@@ -14,8 +14,9 @@ a test fails when the committed file is out of date.
 
 ## Base URL, authentication, CORS
 
-* Production: `https://<api domain>/api/v1` (the domain is in the deployment notes of the
-  main `README.md`). Local: `http://localhost:8000/api/v1` (`uv run catalog-scraper api`).
+* Production: `https://api-haoyfwryqzh3rskh66g9evxy.185.252.233.123.sslip.io/api/v1`
+  (Swagger UI: `/api/v1/docs`). Local: `http://localhost:8000/api/v1`
+  (`uv run catalog-scraper api`).
 * Every endpoint except `GET /health` requires the API key: header `X-API-Key: <key>` (or
   `Authorization: Bearer <key>`). A missing or wrong key gives `401 unauthorized`. The key is
   a server secret (`API_KEY`): a browser frontend should get it from its own backend or from
