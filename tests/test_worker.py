@@ -43,3 +43,8 @@ def test_price_refresh_can_be_disabled_and_waits_for_a_catalog():
     assert next_operation(history(recent, recent, NOW - timedelta(days=30)), disabled, NOW) is None
     # no catalog yet and a recent failed attempt: no price refresh on an empty catalog
     assert next_operation(history(None, NOW - timedelta(hours=1)), CONFIG, NOW) is None
+
+
+def test_interrupted_runs_are_not_failures():
+    # load_history only reports *failed* attempts: an aborted run (redeploy) yields no back-off
+    assert next_operation(history(None, None), CONFIG, NOW) == "catalog_sync"

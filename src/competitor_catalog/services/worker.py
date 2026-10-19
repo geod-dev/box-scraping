@@ -35,6 +35,7 @@ class WorkerConfig:
     retry_after_failure: timedelta
     poll_seconds: float
     stale_run_after: timedelta
+    resume_within: timedelta | None = None
 
     @classmethod
     def from_env(cls) -> WorkerConfig:
@@ -46,15 +47,17 @@ class WorkerConfig:
             retry_after_failure=timedelta(hours=float(os.environ.get("RUN_RETRY_AFTER_HOURS", "6"))),
             poll_seconds=float(os.environ.get("WORKER_POLL_SECONDS", "600")),
             stale_run_after=timedelta(minutes=float(os.environ.get("STALE_RUN_MINUTES", "30"))),
+            resume_within=timedelta(hours=float(os.environ.get("CATALOG_RESUME_HOURS", "48"))),
         )
 
 
 @dataclass(frozen=True)
 class RunHistory:
     last_full_catalog_done: datetime | None  # finished full-scope catalog run (succeeded/partial)
-    last_catalog_attempt: datetime | None  # any catalog run start
+    last_catalog_attempt: datetime | None  # start of the last *failed* full catalog run
     last_price_capture: datetime | None  # finished run of either operation (succeeded/partial)
-    last_price_attempt: datetime | None
+    last_price_attempt: datetime | None  # start of the last *failed* price refresh
+    # (interrupted runs - status aborted - are resumed at once, without back-off)
 
 
 def next_operation(history: RunHistory, config: WorkerConfig, now: datetime) -> str | None:
@@ -88,10 +91,15 @@ def load_history(session: Session, competitor_id: int) -> RunHistory:
             ScrapeRun.status.in_(DONE_STATUSES),
         ),
         last_catalog_attempt=latest(
-            ScrapeRun.started_at, ScrapeRun.operation == "catalog_discovery", ScrapeRun.full_scope.is_(True)
+            ScrapeRun.started_at,
+            ScrapeRun.operation == "catalog_discovery",
+            ScrapeRun.full_scope.is_(True),
+            ScrapeRun.status == "failed",
         ),
         last_price_capture=latest(ScrapeRun.finished_at, ScrapeRun.status.in_(DONE_STATUSES)),
-        last_price_attempt=latest(ScrapeRun.started_at, ScrapeRun.operation == "price_refresh"),
+        last_price_attempt=latest(
+            ScrapeRun.started_at, ScrapeRun.operation == "price_refresh", ScrapeRun.status == "failed"
+        ),
     )
 
 
@@ -109,7 +117,7 @@ def abort_stale_runs(factory: sessionmaker[Session], older_than: timedelta) -> i
 
 def run_worker(settings, config: WorkerConfig, *, once: bool = False) -> None:  # pragma: no cover - I/O loop
     from competitor_catalog.app import build_context, build_fetcher
-    from competitor_catalog.services.catalog_sync import CatalogSync
+    from competitor_catalog.services.catalog_sync import CatalogSync, CatalogSyncOptions
     from competitor_catalog.services.price_refresh import PriceRefresh, PriceRefreshOptions
 
     log.info(
@@ -118,10 +126,13 @@ def run_worker(settings, config: WorkerConfig, *, once: bool = False) -> None:  
         config.catalog_interval,
         config.price_interval or "never",
     )
+    first_pass = True
     while True:
         for key in config.competitors:
             ctx = build_context(settings, key)
-            closed = abort_stale_runs(ctx.factory, config.stale_run_after)
+            # At start-up every 'running' run belongs to a process that no longer exists
+            # (redeploy/restart); afterwards only runs without recent heartbeat are closed.
+            closed = abort_stale_runs(ctx.factory, timedelta(0) if first_pass else config.stale_run_after)
             if closed:
                 log.warning("closed %d stale running run(s)", closed)
             with transaction(ctx.factory) as session:
@@ -132,7 +143,10 @@ def run_worker(settings, config: WorkerConfig, *, once: bool = False) -> None:  
             log.info("%s: starting %s", key, operation)
             with build_fetcher(settings, ctx.config) as fetcher:
                 if operation == "catalog_sync":
-                    result = CatalogSync(ctx.adapter, fetcher, ctx.factory, ctx.competitor_id).run()
+                    resume = config.resume_within.total_seconds() / 3600 if config.resume_within else None
+                    result = CatalogSync(ctx.adapter, fetcher, ctx.factory, ctx.competitor_id).run(
+                        CatalogSyncOptions(resume_within_hours=resume)
+                    )
                 else:
                     # products priced recently (e.g. by the catalog sync) are skipped
                     fresh_hours = config.price_interval.total_seconds() / 3600 / 2
@@ -140,6 +154,7 @@ def run_worker(settings, config: WorkerConfig, *, once: bool = False) -> None:  
                         PriceRefreshOptions(skip_fresh_hours=fresh_hours)
                     )
             log.info("%s: %s run #%s finished with status %s", key, operation, result.run_id, result.status)
+        first_pass = False
         if once:
             return
         time.sleep(config.poll_seconds)

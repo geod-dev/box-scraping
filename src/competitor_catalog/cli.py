@@ -56,6 +56,9 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--max-products", type=int, help="only sync the first N discovered products (partial scope)")
     s.add_argument("--skip-products", action="store_true", help="only crawl categories and product URLs")
     s.add_argument("--allow-mass-missing", action="store_true", help="bypass the missing-products safety threshold")
+    s.add_argument(
+        "--resume-hours", type=float, help="do not refetch products whose details were synced less than N hours ago"
+    )
     s.add_argument("--request-interval", type=float, help="override the configured delay between requests (s)")
     s.set_defaults(func=cmd_catalog_sync)
 
@@ -168,6 +171,7 @@ def cmd_catalog_sync(args: argparse.Namespace, settings: Any) -> int:
         max_products=args.max_products,
         skip_products=args.skip_products,
         allow_mass_missing=args.allow_mass_missing,
+        resume_within_hours=args.resume_hours,
     )
     with build_fetcher(settings, ctx.config, interval=args.request_interval) as fetcher:
         result = CatalogSync(ctx.adapter, fetcher, ctx.factory, ctx.competitor_id).run(options)

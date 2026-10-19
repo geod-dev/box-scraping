@@ -376,10 +376,27 @@ human validation workflow. A matching job can use `antalis_reference` as evidenc
     (default 180), including at first start;
   * **price refresh** of all active products every `PRICE_REFRESH_INTERVAL_HOURS`
     (default 168 = weekly; `0` disables it), skipping products priced recently;
-  * a failed attempt is retried after `RUN_RETRY_AFTER_HOURS` (6); runs left `running` by a
-    killed container are closed as `aborted` (`STALE_RUN_MINUTES`, 30).
+  * a *failed* attempt is retried after `RUN_RETRY_AFTER_HOURS` (6). An *interrupted* run
+    (redeploy/restart) is not a failure: at start-up the worker closes every `running` run as
+    `aborted` and resumes at once; later, runs without heartbeat for `STALE_RUN_MINUTES` (30)
+    are closed too.
+  * **resume**: a catalog sync does not refetch product pages whose details were synced less
+    than `CATALOG_RESUME_HOURS` (48) ago — it re-walks the category tree (~1.5 h for Antalis)
+    and confirms those products as seen, then continues with the rest.
   Operations run one after the other in a single process: the crawl delay always holds.
-* Required Coolify environment variable: `SCRAPEDO_API_KEY` (secret).
+* Required Coolify environment variable: `SCRAPEDO_API_KEY` (secret, runtime only).
+
+**Redeploying / restarting** stops the running crawl immediately (the container is
+replaced). Data already written is kept (Postgres volume, one transaction per page/product);
+the new worker closes the interrupted run as `aborted` and resumes as described above.
+A redeploy during a catalog sync therefore costs ~1.5 h of listing pages, not the products.
+
+**Access / management surface**: the deployment exposes **nothing** to the internet — no
+HTTP API, no web UI, no published port; PostgreSQL is only reachable from the compose
+network. Management goes through Coolify (logs, environment variables, restart/redeploy,
+container terminal for CLI commands). To query the data from outside, prefer an SSH tunnel
+to the server (or Coolify's "make database public" with a firewall rule / read-only user)
+rather than a permanently public database.
 
 Ad-hoc commands on the server: open the worker container terminal in Coolify and run e.g.
 `catalog-scraper runs`, `catalog-scraper prices --competitor antalis_fr --product 503623`,

@@ -291,6 +291,21 @@ def test_retry_failed_from_a_catalog_run_matches_by_url(toy):
     assert fetcher.requests == [f"{BASE}/p/A3"]
 
 
+def test_resume_skips_recently_synced_products_but_counts_them_as_seen(toy):
+    site = toy_site()
+    first, _ = toy.sync(site, max_products=2)  # interrupted sweep: 2 products synced
+    assert first.status == "partial"
+    result, fetcher = toy.sync(site, resume_within_hours=48)
+    assert result.status == "succeeded"
+    fetched = {u for u in fetcher.requests if "/p/" in u}
+    assert len(fetched) == 2  # only the two products not synced yet
+    assert result.counters["products_seen"] == 4
+    with transaction(toy.factory) as s:
+        run = s.get(ScrapeRun, result.run_id)
+        assert run.stats["products_resumed"] == 2
+        assert all(p.last_seen_run_id == run.id for p in s.scalars(select(Product)))
+
+
 # --------------------------------------------------------------------------- price refresh
 
 

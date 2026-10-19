@@ -15,14 +15,17 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from competitor_catalog.core.adapter import CompetitorAdapter
 from competitor_catalog.core.errors import PageError, PageParseError
 from competitor_catalog.core.types import PageKind, ProductLink
 from competitor_catalog.db import repositories as repo
+from competitor_catalog.db.models import Product
 from competitor_catalog.db.session import transaction
 from competitor_catalog.http.base import FatalFetchError, FetchedPage, Fetcher, FetchError, TargetGoneError
 from competitor_catalog.services.runs import RunTracker, utcnow
@@ -38,6 +41,9 @@ class CatalogSyncOptions:
     skip_products: bool = False
     # Safety net: refuse to flag more than this share of active products as missing.
     max_missing_ratio: float = 0.2
+    # Resume support: products whose details were synced less than N hours ago (typically by
+    # an interrupted previous run) are not fetched again, only confirmed as seen.
+    resume_within_hours: float | None = None
     allow_mass_missing: bool = False
 
     @property
@@ -240,9 +246,14 @@ class CatalogSync:
         # through a family page afterwards is recognised and not fetched twice.
         links = sorted(state.product_links.items(), key=lambda kv: kv[0] not in state.prefetched)
         processed_refs: set[str] = set()
+        recent = self._recently_synced(options)
         processed = 0
         for key, link in links:
             if link.reference and link.reference in processed_refs:
+                continue
+            recent_id = recent.get(f"ref:{link.reference}") or recent.get(f"url:{link.url}")
+            if recent_id is not None and key not in state.prefetched:
+                self._confirm_recent(tracker, state, key, link, recent_id)
                 continue
             if options.max_products is not None and processed >= options.max_products:
                 state.incomplete(f"product limit {options.max_products} reached")
@@ -325,6 +336,47 @@ class CatalogSync:
                     status="skipped",
                     warnings=[f"discovered, not synced in this run (reference {link.reference})"],
                 )
+
+    def _recently_synced(self, options: CatalogSyncOptions) -> dict[str, int]:
+        if not options.resume_within_hours:
+            return {}
+        cutoff = utcnow() - timedelta(hours=options.resume_within_hours)
+        with transaction(self.factory) as session:
+            rows = session.execute(
+                select(Product.id, Product.catalog_reference, Product.url).where(
+                    Product.competitor_id == self.competitor_id,
+                    Product.status == "active",
+                    Product.details_updated_at >= cutoff,
+                )
+            ).all()
+        recent: dict[str, int] = {}
+        for product_id, reference, url in rows:
+            if reference:
+                recent[f"ref:{reference}"] = product_id
+            recent[f"url:{url}"] = product_id
+        return recent
+
+    def _confirm_recent(
+        self, tracker: RunTracker, state: _CrawlState, key: str, link: ProductLink, product_id: int
+    ) -> None:
+        """Listed again and synced recently: count it as seen without fetching it again."""
+        state.processed_product_keys.add(key)
+        with transaction(self.factory) as session:
+            session.execute(
+                update(Product)
+                .where(Product.id == product_id)
+                .values(last_seen_run_id=tracker.run_id, last_seen_at=utcnow(), status="active", missing_since=None)
+            )
+            tracker.add_item(
+                session,
+                item_type="product",
+                url=link.url,
+                status="skipped",
+                product_id=product_id,
+                warnings=["details synced recently (resume): not fetched again"],
+            )
+        tracker.bump(products_seen=1)
+        tracker.stats["products_resumed"] = tracker.stats.get("products_resumed", 0) + 1
 
     # ------------------------------------------------------------------ helpers
     def _fetch(
