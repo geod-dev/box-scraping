@@ -1,0 +1,62 @@
+# Antalis France e-shop. See README.md "Adding a competitor" for the meaning of each key.
+key: antalis_fr
+name: Antalis France
+base_url: https://www.antalis.fr
+adapter: competitor_catalog.adapters.antalis:AntalisAdapter
+enabled: true
+
+# Initial scope: the packaging sector only (not the whole Antalis site).
+# The URL redirects (301) to .../packaging-machines-emballage/cat-3, its canonical URL.
+root_urls:
+  - https://www.antalis.fr/eshop/packaging-machines-emballage
+
+# robots.txt of www.antalis.fr declares "Crawl-delay: 10" for all user agents: we honour it.
+request_interval_seconds: 10
+max_attempts: 4
+default_currency: EUR
+
+# Scrape.do request options. Plain datacenter requests (1 credit) return the full server-side
+# rendered HTML: no JavaScript rendering is needed for this site (tested 2026-10-19).
+scrapedo:
+  render: false
+  super: false
+  geo_code: fr
+  timeout_ms: 60000
+
+options:
+  # pageDataModel.category_type_id placeholder used by sector pages (not a real id).
+  ignored_category_external_ids: [HQ00000]
+  catalog_reference_is_antalis_reference: true
+  # Some products (machines...) show no price, only "Demander à être rappelé", while their
+  # JSON-LD offer carries a price. true = record it as an observation flagged
+  # displayed=false with unknown basis/tax; false = record "no_price".
+  record_undisplayed_json_ld_price: true
+  # Canonical normalized attribute -> Antalis characteristic labels (matching is case and
+  # accent insensitive). Keys ending in _mm/_m/_um/_g/_g_m2 are converted to that unit.
+  attribute_mapping:
+    length_mm: ["Longueur (mm)"]
+    width_mm: ["Largeur (mm)"]
+    height_mm: ["Hauteur (mm)"]
+    inner_length_mm: ["Longueur intérieure (mm)", "Longueur interieure (mm)"]
+    inner_width_mm: ["Largeur intérieure (mm)", "Largeur interieure (mm)"]
+    inner_height_mm: ["Hauteur intérieure (mm)", "Hauteur interieure (mm)"]
+    outer_length_mm: ["Longueur extérieure (mm)"]
+    outer_width_mm: ["Largeur extérieure (mm)"]
+    outer_height_mm: ["Hauteur extérieure (mm)"]
+    diameter_mm: ["Diamètre (mm)", "Diamètre intérieur (mm)"]
+    core_diameter_mm: ["Mandrin (mm)"]
+    roll_length_m: ["Longueur des rouleaux (m)", "Longueur (m)"]
+    thickness_um: ["Epaisseur (µ)", "Épaisseur (µ)", "Epaisseur (µm)", "Epaisseur (microns)"]
+    thickness_mm: ["Epaisseur (mm)", "Épaisseur (mm)"]
+    grammage_g_m2: ["Grammage (g/m²)", "Grammage (g/m2)"]
+    material: ["Matériau", "Matériau extérieur", "Matière"]
+    inner_material: ["Matériau intérieur", "Matériau interieur"]
+    flute_wall: ["Nombre de cannelures"]  # simple / double / triple cannelure
+    flute_type: ["Type de cannelure", "Cannelure"]
+    color: ["Couleur de base", "Couleur"]
+    packaging_unit: ["Unité d'emballage", "Conditionnement"]
+    pallet_quantity: ["Quantité sur palette"]
+    fefco: ["FEFCO"]
+    bottom_type: ["Type de fond"]
+    adhesive_type: ["Type de colle"]
+    food_contact: ["Aptitude au contact alimentaire"]
