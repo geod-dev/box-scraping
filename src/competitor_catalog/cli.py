@@ -96,9 +96,18 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=15)
     s.set_defaults(func=cmd_runs)
 
-    s = sub.add_parser("worker", help="run migrations, then the scheduler loop (server deployment)")
-    s.add_argument("--once", action="store_true", help="evaluate the schedule once and exit")
+    s = sub.add_parser("worker", help="run migrations, then execute the jobs requested through the API")
+    s.add_argument("--once", action="store_true", help="one scheduling pass, wait for the started jobs, exit")
     s.set_defaults(func=cmd_worker)
+
+    s = sub.add_parser("api", help="run migrations, then serve the HTTP API (uvicorn)")
+    s.add_argument("--host", default=None, help="default: API_HOST or 0.0.0.0")
+    s.add_argument("--port", type=int, default=None, help="default: API_PORT or 8000")
+    s.set_defaults(func=cmd_api)
+
+    s = sub.add_parser("export-openapi", help="write the OpenAPI schema (docs/api/openapi.json)")
+    s.add_argument("--out", type=Path, default=PROJECT_ROOT / "docs" / "api" / "openapi.json")
+    s.set_defaults(func=cmd_export_openapi)
 
     s = sub.add_parser("fetch", help="fetch one URL through Scrape.do and save the HTML (debug/fixtures)")
     s.add_argument("--competitor", required=True)
@@ -112,13 +121,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def cmd_db_upgrade(args: argparse.Namespace, settings: Any) -> int:
-    from alembic import command
-    from alembic.config import Config
+    from competitor_catalog.db.migrate import upgrade_database
 
-    cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
-    cfg.attributes["configure_logger"] = False
-    cfg.attributes["db_url"] = settings.require_database_url()
-    command.upgrade(cfg, "head")
+    upgrade_database(settings.require_database_url())
     print("database schema up to date")
     return 0
 
@@ -359,10 +364,51 @@ def cmd_runs(args: argparse.Namespace, settings: Any) -> int:
 
 
 def cmd_worker(args: argparse.Namespace, settings: Any) -> int:
-    from competitor_catalog.services.worker import WorkerConfig, run_worker
+    from competitor_catalog.services.dispatcher import Dispatcher, DispatcherConfig
 
     cmd_db_upgrade(args, settings)
-    run_worker(settings, WorkerConfig.from_env(), once=args.once)
+    settings.require_scrapedo_api_key()
+    dispatcher = Dispatcher(
+        session_factory(settings),
+        settings.competitor_config_dir,
+        lambda config: build_fetcher(settings, config),
+        DispatcherConfig.from_env(),
+    )
+    if args.once:
+        dispatcher.startup()
+        dispatcher.tick()
+        for thread in list(dispatcher.threads.values()):
+            thread.join()
+        return 0
+    dispatcher.run_forever()
+    return 0
+
+
+def cmd_api(args: argparse.Namespace, settings: Any) -> int:
+    import os
+
+    import uvicorn
+
+    from competitor_catalog.api.main import create_app
+
+    cmd_db_upgrade(args, settings)
+    app = create_app(settings)
+    uvicorn.run(
+        app,
+        host=args.host or os.environ.get("API_HOST", "0.0.0.0"),
+        port=args.port or int(os.environ.get("API_PORT", "8000")),
+        log_config=None,  # keep our logging configuration (secret redaction)
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
+    return 0
+
+
+def cmd_export_openapi(args: argparse.Namespace, settings: Any) -> int:
+    from competitor_catalog.api.openapi import export_openapi
+
+    export_openapi(args.out)
+    print(f"wrote {args.out}")
     return 0
 
 

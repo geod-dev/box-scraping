@@ -1,0 +1,214 @@
+"""Duration/cost estimates of a worker task, before it starts and while it runs.
+
+The unit of work is one HTTP request (one page). The number of requests comes from the
+run history of the competitor (last full catalog crawl, products in database), falling
+back to the ``estimate_hints`` of the competitor config; the time per request comes from
+the measured duration of previous runs, falling back to the configured crawl delay.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from competitor_catalog.core.config import CompetitorConfig
+from competitor_catalog.db import repositories as repo
+from competitor_catalog.db.models import Category, Product, ScrapeRun, ScrapeRunItem, WorkerJob
+from competitor_catalog.services.runs import utcnow
+
+# Measured overhead of one Scrape.do request on top of the crawl delay (no rendering).
+DEFAULT_REQUEST_OVERHEAD_SECONDS = 1.5
+MIN_PAGES_FOR_MEASURE = 20
+
+
+@dataclass
+class Estimate:
+    task: str
+    listing_pages: int | None = None  # catalog sync only
+    products: int | None = None  # product pages to fetch
+    requests: int | None = None
+    seconds_per_request: float = 0.0
+    seconds: float | None = None
+    credits: int | None = None
+    basis: list[str] = field(default_factory=list)  # human-readable provenance of each figure
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def seconds_per_request(session: Session, competitor_id: int, config: CompetitorConfig) -> tuple[float, str]:
+    """Average wall-clock time per request over recent finished runs of this competitor."""
+    rows = session.execute(
+        select(
+            ScrapeRun.id, ScrapeRun.started_at, ScrapeRun.finished_at, ScrapeRun.pages_fetched, ScrapeRun.pages_failed
+        )
+        .where(
+            ScrapeRun.competitor_id == competitor_id,
+            ScrapeRun.finished_at.is_not(None),
+            ScrapeRun.pages_fetched + ScrapeRun.pages_failed >= MIN_PAGES_FOR_MEASURE,
+        )
+        .order_by(ScrapeRun.finished_at.desc())
+        .limit(5)
+    ).all()
+    # time spent paused (worker jobs) is not crawl time
+    paused = {
+        run_id: float((progress or {}).get("paused_seconds") or 0)
+        for run_id, progress in session.execute(
+            select(WorkerJob.scrape_run_id, WorkerJob.progress).where(WorkerJob.scrape_run_id.in_([r.id for r in rows]))
+        )
+    }
+    seconds = sum((r.finished_at - r.started_at).total_seconds() - paused.get(r.id, 0.0) for r in rows)
+    pages = sum(r.pages_fetched + r.pages_failed for r in rows)
+    if pages:
+        return seconds / pages, f"{seconds / pages:.1f}s/request measured over {len(rows)} previous run(s)"
+    value = config.request_interval_seconds + DEFAULT_REQUEST_OVERHEAD_SECONDS
+    return value, f"{value:.1f}s/request = crawl delay {config.request_interval_seconds:g}s + typical overhead"
+
+
+def credits_per_request(session: Session, competitor_id: int) -> float:
+    credits, pages = session.execute(
+        select(func.sum(ScrapeRun.credits_used), func.sum(ScrapeRun.pages_fetched)).where(
+            ScrapeRun.competitor_id == competitor_id, ScrapeRun.credits_used > 0
+        )
+    ).one()
+    return float(credits) / float(pages) if credits and pages else 1.0
+
+
+def listing_pages_estimate(session: Session, competitor_id: int, config: CompetitorConfig) -> tuple[int | None, str]:
+    def listing_items(run_id: int) -> int:
+        return session.scalar(
+            select(func.count())
+            .select_from(ScrapeRunItem)
+            .where(ScrapeRunItem.scrape_run_id == run_id, ScrapeRunItem.item_type == "listing_page")
+        )
+
+    done = session.scalar(
+        select(ScrapeRun.id)
+        .where(
+            ScrapeRun.competitor_id == competitor_id,
+            ScrapeRun.operation == "catalog_discovery",
+            ScrapeRun.full_scope.is_(True),
+            ScrapeRun.status.in_(("succeeded", "partial")),
+        )
+        .order_by(ScrapeRun.finished_at.desc())
+        .limit(1)
+    )
+    if done is not None:
+        count = listing_items(done)
+        if count:
+            return count, f"{count} listing pages in the last full catalog sync (run #{done})"
+    hint = config.estimate_hints.get("listing_pages")
+    if hint:
+        return int(hint), f"{hint} listing pages (estimate_hints of the competitor config)"
+    categories = session.scalar(
+        select(func.count()).select_from(Category).where(Category.competitor_id == competitor_id)
+    )
+    if categories:
+        return categories, f"{categories} known categories (at least one listing page each)"
+    return None, "listing pages unknown (no history, no estimate_hints)"
+
+
+def estimate_job(
+    session: Session, competitor_id: int, config: CompetitorConfig, task: str, options: dict[str, Any]
+) -> Estimate:
+    spr, spr_basis = seconds_per_request(session, competitor_id, config)
+    estimate = Estimate(task=task, seconds_per_request=round(spr, 2), basis=[spr_basis])
+    if task == "catalog_sync":
+        partial = any(options.get(k) for k in ("root_urls", "max_listing_pages", "max_products", "skip_products"))
+        if partial:
+            estimate.basis.append("partial scope: figures assume the full catalog, the run will be shorter")
+        pages, basis = listing_pages_estimate(session, competitor_id, config)
+        if options.get("max_listing_pages") and pages:
+            pages = min(pages, int(options["max_listing_pages"]))
+        estimate.listing_pages = pages
+        estimate.basis.append(basis)
+        known = session.scalar(
+            select(func.count())
+            .select_from(Product)
+            .where(Product.competitor_id == competitor_id, Product.status == "active")
+        )
+        hint = int(config.estimate_hints.get("products") or 0)
+        products: int | None
+        if options.get("skip_products"):
+            products, basis = 0, "products not synced (skip_products)"
+        elif competitor_has_full_catalog(session, competitor_id) is False and hint > known:
+            # the database only holds a sample: the catalog size comes from the hint
+            products = hint
+            basis = f"{hint} products (estimate_hints; only {known} in database, no full catalog sync yet)"
+        elif known:
+            recent = 0
+            if options.get("resume_within_hours"):
+                cutoff = utcnow() - timedelta(hours=float(options["resume_within_hours"]))
+                recent = session.scalar(
+                    select(func.count())
+                    .select_from(Product)
+                    .where(
+                        Product.competitor_id == competitor_id,
+                        Product.status == "active",
+                        Product.details_updated_at >= cutoff,
+                    )
+                )
+            products = known - recent
+            basis = f"{known} active products in database" + (f", {recent} synced recently (skipped)" if recent else "")
+        elif hint:
+            products = hint
+            basis = f"{products} products (estimate_hints of the competitor config)"
+        else:
+            products, basis = None, "number of products unknown (no history, no estimate_hints)"
+        if options.get("max_products") is not None and products is not None:
+            products = min(products, int(options["max_products"]))
+        estimate.products = products
+        estimate.basis.append(basis)
+        if pages is not None and products is not None:
+            estimate.requests = pages + products
+    elif task == "price_refresh":
+        estimate.products = count_price_refresh_selection(session, competitor_id, options)
+        estimate.requests = estimate.products
+        estimate.basis.append(f"{estimate.products} products selected by the options")
+    else:
+        raise ValueError(f"unknown task {task!r}")
+    if estimate.requests is not None:
+        estimate.seconds = round(estimate.requests * spr)
+        estimate.credits = round(estimate.requests * credits_per_request(session, competitor_id))
+    return estimate
+
+
+def competitor_has_full_catalog(session: Session, competitor_id: int) -> bool:
+    return (
+        session.scalar(
+            select(ScrapeRun.id)
+            .where(
+                ScrapeRun.competitor_id == competitor_id,
+                ScrapeRun.operation == "catalog_discovery",
+                ScrapeRun.full_scope.is_(True),
+                ScrapeRun.status.in_(("succeeded", "partial")),
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def count_price_refresh_selection(session: Session, competitor_id: int, options: dict[str, Any]) -> int:
+    category_ids = None
+    if options.get("category"):
+        category = repo.find_category_by_any(session, competitor_id, str(options["category"]))
+        category_ids = repo.category_subtree_ids(session, competitor_id, category.id) if category else []
+    product_ids = None
+    if options.get("retry_failed_run_id") is not None:
+        product_ids = repo.failed_product_ids(session, competitor_id, int(options["retry_failed_run_id"]))
+    fresh = options.get("skip_fresh_hours")
+    stmt = repo.select_products_for_price_refresh(
+        competitor_id,
+        category_ids=category_ids,
+        references=options.get("references") or None,
+        product_ids=product_ids,
+        include_missing=bool(options.get("include_missing")),
+        fresher_than=utcnow() - timedelta(hours=float(fresh)) if fresh is not None else None,
+        limit=options.get("limit"),
+    )
+    return session.scalar(select(func.count()).select_from(stmt.subquery()))

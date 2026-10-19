@@ -32,6 +32,9 @@ class CompetitorConfig:
     default_currency: str = "EUR"
     scrapedo: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)  # adapter-specific settings
+    # Expected catalog size, used to estimate durations before any run history exists:
+    # {"listing_pages": int, "products": int}
+    estimate_hints: dict[str, Any] = field(default_factory=dict)
     source_path: Path | None = None
 
     @property
@@ -74,6 +77,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
         "default_currency",
         "scrapedo",
         "options",
+        "estimate_hints",
     }
     unknown = set(data) - known
     if unknown:
@@ -90,6 +94,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
         default_currency=str(data.get("default_currency", "EUR")),
         scrapedo=dict(data.get("scrapedo") or {}),
         options=dict(data.get("options") or {}),
+        estimate_hints=dict(data.get("estimate_hints") or {}),
         source_path=source_path,
     )
 

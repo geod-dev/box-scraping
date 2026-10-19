@@ -33,11 +33,57 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class RunStopped(Exception):  # noqa: N818 - control flow, not an error
+    """Raised at a safe point of a run when it must stop before the end."""
+
+
+class RunCancelled(RunStopped):
+    """A user asked to stop the run (API cancel)."""
+
+
+class RunInterrupted(RunStopped):
+    """The process is shutting down (redeploy, container stop)."""
+
+
+class RunObserver:
+    """Progress and cooperative-stop hooks of a run. The default implementation does nothing.
+
+    ``progress`` reports the current step with the items done, the exact goal when known
+    and, when the goal is unknown, the number of items already known to be pending.
+    ``check_stop`` is called at safe points and may raise :class:`RunStopped`.
+    """
+
+    def run_started(self, run_id: int) -> None:
+        pass
+
+    def progress(self, step: str, done: int, goal: int | None = None, pending: int | None = None) -> None:
+        pass
+
+    def item(self, item_type: str, status: str, url: str, error: BaseException | None) -> None:
+        pass
+
+    def checkpoint(self, counters: dict[str, int], credits_used: int) -> None:
+        pass
+
+    def check_stop(self) -> None:
+        pass
+
+
+NULL_OBSERVER = RunObserver()
+
+
 class RunTracker:
-    def __init__(self, factory: sessionmaker[Session], competitor_id: int, operation: str):
+    def __init__(
+        self,
+        factory: sessionmaker[Session],
+        competitor_id: int,
+        operation: str,
+        observer: RunObserver | None = None,
+    ):
         self.factory = factory
         self.competitor_id = competitor_id
         self.operation = operation
+        self.observer = observer or NULL_OBSERVER
         self.run_id: int | None = None
         self.counters: Counter[str] = Counter()
         self.stats: dict[str, Any] = {}
@@ -58,6 +104,7 @@ class RunTracker:
             session.flush()
             self.run_id = run.id
         log.info("started %s run #%s", self.operation, self.run_id)
+        self.observer.run_started(self.run_id)
         return self.run_id
 
     def bump(self, **counts: int) -> None:
@@ -96,6 +143,7 @@ class RunTracker:
                 warnings=warnings or None,
             )
         )
+        self.observer.item(item_type, status, url, error)
 
     def add_item_tx(self, **kwargs: Any) -> None:
         with transaction(self.factory) as session:
@@ -111,6 +159,7 @@ class RunTracker:
             run.credits_used = self.credits_used
             run.stats = self.stats
             run.heartbeat_at = utcnow()
+        self.observer.checkpoint(self.snapshot(), self.credits_used)
 
     def finish(self, status: str, *, error: str | None = None, credits_used: int | None = None) -> None:
         self.flush(credits_used)

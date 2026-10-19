@@ -28,7 +28,7 @@ from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import Product
 from competitor_catalog.db.session import transaction
 from competitor_catalog.http.base import FatalFetchError, FetchedPage, Fetcher, FetchError, TargetGoneError
-from competitor_catalog.services.runs import RunTracker, utcnow
+from competitor_catalog.services.runs import RunObserver, RunStopped, RunTracker, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -73,16 +73,18 @@ class CatalogSync:
         fetcher: Fetcher,
         factory: sessionmaker[Session],
         competitor_id: int,
+        observer: RunObserver | None = None,
     ):
         self.adapter = adapter
         self.fetcher = fetcher
         self.factory = factory
         self.competitor_id = competitor_id
+        self.observer = observer or RunObserver()
 
     def run(self, options: CatalogSyncOptions | None = None) -> CatalogSyncResult:
         options = options or CatalogSyncOptions()
         roots = [self.adapter.normalize_url(u) for u in (options.root_urls or self.adapter.config.root_urls)]
-        tracker = RunTracker(self.factory, self.competitor_id, "catalog_discovery")
+        tracker = RunTracker(self.factory, self.competitor_id, "catalog_discovery", self.observer)
         params: dict[str, Any] = {
             "root_urls": roots,
             "max_listing_pages": options.max_listing_pages,
@@ -98,6 +100,8 @@ class CatalogSync:
             tracker.stats["duplicate_product_links_ignored"] = state.duplicate_product_links
             if not options.skip_products:
                 self._sync_products(tracker, state, options)
+            self.observer.check_stop()
+            self.observer.progress("finalize", 0, 1)
             self._record_unprocessed_links(tracker, state)
             with transaction(self.factory) as session:
                 linked = repo.resolve_category_parents(session, self.competitor_id)
@@ -111,6 +115,9 @@ class CatalogSync:
             log.error(error)
         except KeyboardInterrupt:
             status, error = "aborted", "interrupted by user"
+            raise
+        except RunStopped as exc:
+            status, error = "aborted", f"stopped: {exc}"
             raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -134,7 +141,9 @@ class CatalogSync:
         queue: deque[str] = deque(state.roots)
         queued: set[str] = set(state.roots)
         pages = 0
+        self.observer.progress("crawl_listings", 0, None, pending=len(queue))
         while queue:
+            self.observer.check_stop()
             if options.max_listing_pages is not None and pages >= options.max_listing_pages:
                 state.incomplete(f"listing page limit {options.max_listing_pages} reached")
                 break
@@ -149,6 +158,8 @@ class CatalogSync:
                 log.exception("unexpected error on listing page %s", url)
                 self._page_failed(tracker, state, url, exc, critical=is_root)
             tracker.flush(_credits(self.fetcher))
+            self.observer.progress("crawl_listings", pages, None, pending=len(queue))
+        self.observer.progress("crawl_listings", pages, pages)
 
         for owner, (expected, found) in state.expected_counts().items():
             if expected is not None and found < expected:
@@ -247,8 +258,17 @@ class CatalogSync:
         links = sorted(state.product_links.items(), key=lambda kv: kv[0] not in state.prefetched)
         processed_refs: set[str] = set()
         recent = self._recently_synced(options)
+        to_fetch = sum(
+            1
+            for key, link in links
+            if key in state.prefetched or not (recent.get(f"ref:{link.reference}") or recent.get(f"url:{link.url}"))
+        )
+        if options.max_products is not None:
+            to_fetch = min(to_fetch, options.max_products)
         processed = 0
+        self.observer.progress("sync_products", 0, to_fetch)
         for key, link in links:
+            self.observer.check_stop()
             if link.reference and link.reference in processed_refs:
                 continue
             recent_id = recent.get(f"ref:{link.reference}") or recent.get(f"url:{link.url}")
@@ -273,6 +293,7 @@ class CatalogSync:
             if processed % 10 == 0:
                 log.info("products %d/%d", processed, len(links))
             tracker.flush(_credits(self.fetcher))
+            self.observer.progress("sync_products", processed, max(to_fetch, processed))
 
     def _process_product(self, tracker: RunTracker, state: _CrawlState, key: str, link: ProductLink) -> str | None:
         page = state.prefetched.pop(key, None) or self._fetch(tracker, link.url, "product", state)

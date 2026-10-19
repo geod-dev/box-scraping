@@ -26,5 +26,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
 RUN useradd --system --uid 10001 --home /app scraper && chown -R scraper /app
 USER scraper
 
+EXPOSE 8000
 ENTRYPOINT ["catalog-scraper"]
 CMD ["worker"]

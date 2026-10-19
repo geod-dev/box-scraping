@@ -21,7 +21,7 @@ from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import Product
 from competitor_catalog.db.session import transaction
 from competitor_catalog.http.base import FatalFetchError, Fetcher, FetchError, TargetGoneError
-from competitor_catalog.services.runs import RunTracker, utcnow
+from competitor_catalog.services.runs import RunObserver, RunStopped, RunTracker, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -56,11 +56,13 @@ class PriceRefresh:
         fetcher: Fetcher,
         factory: sessionmaker[Session],
         competitor_id: int,
+        observer: RunObserver | None = None,
     ):
         self.adapter = adapter
         self.fetcher = fetcher
         self.factory = factory
         self.competitor_id = competitor_id
+        self.observer = observer or RunObserver()
 
     def select_products(self, options: PriceRefreshOptions) -> list[Product]:
         with transaction(self.factory) as session:
@@ -90,7 +92,7 @@ class PriceRefresh:
     def run(self, options: PriceRefreshOptions | None = None) -> PriceRefreshResult:
         options = options or PriceRefreshOptions()
         products = self.select_products(options)
-        tracker = RunTracker(self.factory, self.competitor_id, "price_refresh")
+        tracker = RunTracker(self.factory, self.competitor_id, "price_refresh", self.observer)
         params: dict[str, Any] = {
             "category": options.category,
             "references": options.references,
@@ -105,7 +107,9 @@ class PriceRefresh:
         status, error = "failed", None
         failures = 0
         try:
+            self.observer.progress("refresh_prices", 0, len(products))
             for index, product in enumerate(products, start=1):
+                self.observer.check_stop()
                 try:
                     ok = self._refresh_one(tracker, product, options)
                 except FatalFetchError:
@@ -122,12 +126,16 @@ class PriceRefresh:
                 if index % 10 == 0:
                     log.info("price refresh %d/%d", index, len(products))
                 tracker.flush(_credits(self.fetcher))
+                self.observer.progress("refresh_prices", index, len(products))
             status = "succeeded" if failures == 0 else "partial"
         except FatalFetchError as exc:
             error = f"fatal fetch error: {exc}"
             log.error(error)
         except KeyboardInterrupt:
             status, error = "aborted", "interrupted by user"
+            raise
+        except RunStopped as exc:
+            status, error = "aborted", f"stopped: {exc}"
             raise
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"

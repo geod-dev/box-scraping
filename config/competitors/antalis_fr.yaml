@@ -15,6 +15,12 @@ request_interval_seconds: 10
 max_attempts: 4
 default_currency: EUR
 
+# Catalog size observed during the first discovery (2026-10-19), only used to estimate the
+# duration of the first runs; afterwards estimates come from the run history.
+estimate_hints:
+  listing_pages: 520
+  products: 2200
+
 # Scrape.do request options. Plain datacenter requests (1 credit) return the full server-side
 # rendered HTML: no JavaScript rendering is needed for this site (tested 2026-10-19).
 scrapedo:

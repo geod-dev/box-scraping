@@ -92,7 +92,8 @@ def factory(migrated_engine) -> Iterator[sessionmaker[Session]]:
     with migrated_engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE scrape_observations, scrape_run_items, product_matches, products, categories, "
+                "TRUNCATE notifications, worker_jobs, service_heartbeats, scrape_observations, scrape_run_items, "
+                "product_matches, products, categories, "
                 "scrape_runs, competitors RESTART IDENTITY CASCADE"
             )
         )

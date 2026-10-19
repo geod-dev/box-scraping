@@ -45,6 +45,10 @@ ITEM_STATUSES = ("succeeded", "failed", "not_found", "no_price", "skipped")
 PRICE_BASES = ("unit", "total", "unknown")
 TAX_MODES = ("excl_tax", "incl_tax", "unknown")
 MATCH_STATUSES = ("proposed", "validated", "rejected")
+JOB_TASKS = ("catalog_sync", "price_refresh")
+JOB_STATUSES = ("queued", "running", "paused", "succeeded", "partial", "failed", "cancelled", "interrupted")
+JOB_ACTIVE_STATUSES = ("queued", "running", "paused")
+NOTIFICATION_LEVELS = ("info", "success", "warning", "error")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -87,6 +91,13 @@ class Competitor(TimestampMixin, Base):
     adapter: Mapped[str] = mapped_column(Text)  # import path of the adapter class
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Last full-scope catalog sync that crawled the whole catalog (status succeeded or partial).
+    last_full_catalog_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_full_catalog_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scrape_runs.id", ondelete="SET NULL", use_alter=True, name="fk_competitors_last_full_catalog_run")
+    )
+    last_full_catalog_status: Mapped[str | None] = mapped_column(Text)
+    last_price_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Category(TimestampMixin, Base):
@@ -211,7 +222,7 @@ class ScrapeRun(Base):
     stats: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     error: Mapped[str | None] = mapped_column(Text)
 
-    competitor: Mapped[Competitor] = relationship()
+    competitor: Mapped[Competitor] = relationship(foreign_keys=[competitor_id])
 
 
 class ScrapeRunItem(Base):
@@ -305,3 +316,81 @@ class ProductMatch(TimestampMixin, Base):
     evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     validated_by: Mapped[str | None] = mapped_column(Text)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkerJob(Base):
+    """One task (catalog sync or price refresh) executed by the worker for one competitor."""
+
+    __tablename__ = "worker_jobs"
+    __table_comment__ = "Worker tasks requested through the API; at most one active job per competitor"
+    __table_args__ = (
+        CheckConstraint(_in("task", JOB_TASKS), name="ck_worker_jobs_task"),
+        CheckConstraint(_in("status", JOB_STATUSES), name="ck_worker_jobs_status"),
+        # The rule "never two workers on the same competitor" is enforced by the database.
+        Index(
+            "uq_worker_jobs_one_active_per_competitor",
+            "competitor_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running', 'paused')"),
+        ),
+        Index("ix_worker_jobs_competitor_created", "competitor_id", "created_at"),
+        Index("ix_worker_jobs_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    task: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'queued'"))
+    options: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    requested_by: Mapped[str] = mapped_column(Text, server_default=text("'api'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pause_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # set = keep paused
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # when the worker paused
+    claimed_by: Mapped[str | None] = mapped_column(Text)  # worker process instance id
+    scrape_run_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_runs.id", ondelete="SET NULL"))
+    step: Mapped[str | None] = mapped_column(Text)
+    step_done: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    step_goal: Mapped[int | None] = mapped_column(Integer)
+    progress: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    counters: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    estimate: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    error: Mapped[str | None] = mapped_column(Text)
+
+    competitor: Mapped[Competitor] = relationship()
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    __table_comment__ = "Persisted notifications (job lifecycle, errors), read/unread"
+    __table_args__ = (
+        CheckConstraint(_in("level", NOTIFICATION_LEVELS), name="ck_notifications_level"),
+        Index("ix_notifications_created", "created_at"),
+        Index("ix_notifications_unread", "created_at", postgresql_where=text("read_at IS NULL")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    level: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)  # job_started, job_succeeded, item_errors...
+    title: Mapped[str] = mapped_column(Text)
+    message: Mapped[str | None] = mapped_column(Text)
+    competitor_id: Mapped[int | None] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("worker_jobs.id", ondelete="SET NULL"))
+    scrape_run_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_runs.id", ondelete="SET NULL"))
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ServiceHeartbeat(Base):
+    __tablename__ = "service_heartbeats"
+    __table_comment__ = "Liveness of long-running processes (the worker), shown by the API health endpoint"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    instance: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))

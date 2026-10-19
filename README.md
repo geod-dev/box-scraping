@@ -11,6 +11,11 @@ Two independent operations:
 | **A** | `catalog-scraper catalog-sync` | crawl the category tree from the configured roots, discover product URLs, store categories/products **and** their current prices |
 | **B** | `catalog-scraper price-refresh` | revisit already known product URLs and append price observations only |
 
+On the server they run as **worker jobs** driven by an **HTTP API** (`catalog-scraper api`
++ `catalog-scraper worker`): start/pause/resume/stop a job per competitor, live progress
+and ETA, CRUD on the scraped data, persisted notifications. Nothing scrapes unless a job
+is requested. API guide for client/frontend developers: [`docs/api/`](docs/api/README.md).
+
 Site findings (what is confirmed vs assumed) are in
 [`docs/antalis-observations.md`](docs/antalis-observations.md).
 
@@ -48,6 +53,10 @@ uv run catalog-scraper price-refresh --competitor antalis_fr
 | `LOG_LEVEL` | no | `INFO` by default |
 | `COMPETITOR_CONFIG_DIR` | no | defaults to `config/competitors` |
 | `HTML_ARCHIVE_DIR` | no | if set, every fetched page is saved there (debugging, new fixtures) |
+| `API_KEY` | API | key clients send as `X-API-Key` (`API_AUTH_DISABLED=true`: no auth, local dev only) |
+| `CORS_ORIGINS`, `API_HOST`, `API_PORT` | no | API: allowed origins (default `*`), bind address (`0.0.0.0:8000`) |
+| `AUTO_SCHEDULE` | no | worker: `true` = also enqueue due jobs automatically (default `false`: only API requests) |
+| `WORKER_MAX_CONCURRENT_JOBS`, `WORKER_POLL_SECONDS`, `STALE_JOB_MINUTES` | no | worker tuning (4, 3, 30) |
 
 `.env` is loaded automatically (real environment variables take precedence) and is
 git-ignored; `.env.example` documents the variables without values.
@@ -137,6 +146,30 @@ uv run catalog-scraper fetch --competitor antalis_fr <url> --out page.html      
 
 Exit code: `0` = run succeeded, `2` = run partial/failed (details in `scrape_runs`).
 
+### API and worker
+
+```bash
+uv run catalog-scraper api       # migrations, then the HTTP API on :8000 (docs: /api/v1/docs)
+uv run catalog-scraper worker    # migrations, then executes the jobs requested through the API
+uv run catalog-scraper export-openapi   # regenerate docs/api/openapi.json after an API change
+```
+
+* A **job** = one task (`catalog_sync` = operation A, `price_refresh` = operation B) for one
+  competitor. The database guarantees **at most one active job per competitor** (partial
+  unique index on `worker_jobs`); a price refresh is refused until a full catalog sync
+  finished (`competitors.last_full_catalog_at`).
+* The worker process claims queued jobs (`SKIP LOCKED`), runs each in its own thread with
+  its own fetcher/rate limiter (competitors in parallel, never twice the same site), writes
+  progress (step, done/goal, %, ETA from measured speed) and reads cancel/pause requests
+  at every page. A pause holds the thread between two pages (state kept in memory).
+* Estimates (`services/estimates.py`) count requests from the last full catalog sync / the
+  database / `estimate_hints` of the competitor config, and time per request from the
+  durations of previous runs (crawl delay + overhead otherwise).
+* Notifications (`notifications` table) are written for each job event and for errors
+  (bursts of failures, periodic digests of page errors, crashes).
+* CLI operations (`catalog-sync`, `price-refresh`) still work directly; they do not go
+  through the job queue, so do not run one on a competitor whose worker is busy.
+
 ---
 
 ## 3. Architecture
@@ -152,8 +185,12 @@ src/competitor_catalog/
     html.py, urls.py lxml helpers (JSON-LD, canonical...), URL normalization
   adapters/antalis/ Antalis-specific parsing only (no I/O, no DB)
   db/              SQLAlchemy models, session helpers, repositories (no HTML knowledge)
-  services/        orchestration: catalog_sync.py (A), price_refresh.py (B), runs.py (tracking)
+  services/        orchestration: catalog_sync.py (A), price_refresh.py (B), runs.py (tracking,
+                   progress/stop hooks), jobs.py (job rules, execution, progress), dispatcher.py
+                   (worker process), estimates.py, notifications.py, worker.py (opt-in schedule)
+  api/             FastAPI app: main.py (factory, errors, auth), schemas.py, views.py, routes/
   app.py, cli.py   wiring and command line
+docs/api/                            API guide + openapi.json for client developers
 config/competitors/antalis_fr.yaml   competitor configuration (data, no code)
 migrations/                          Alembic migrations
 tests/                               fixtures + unit, DB and live tests
@@ -366,42 +403,33 @@ human validation workflow. A matching job can use `antalis_reference` as evidenc
 
 ### Server deployment (Coolify)
 
-`Dockerfile` + `docker-compose.coolify.yml` (Coolify "Docker Compose" build pack):
+`Dockerfile` + `docker-compose.coolify.yml` (Coolify "Docker Compose" build pack), one
+image, three services:
 
 * `db` – PostgreSQL 16 with a persistent volume; password generated by Coolify
   (`SERVICE_PASSWORD_POSTGRES`). Not exposed publicly.
-* `worker` – runs `catalog-scraper worker`: applies migrations, then a small scheduler
-  loop (`services/worker.py`) that decides from the run history in the database:
-  * full **catalog sync** when none finished in the last `CATALOG_SYNC_INTERVAL_DAYS`
-    (default 180), including at first start;
-  * **price refresh** of all active products every `PRICE_REFRESH_INTERVAL_HOURS`
-    (default 168 = weekly; `0` disables it), skipping products priced recently;
-  * a *failed* attempt is retried after `RUN_RETRY_AFTER_HOURS` (6). An *interrupted* run
-    (redeploy/restart) is not a failure: at start-up the worker closes every `running` run as
-    `aborted` and resumes at once; later, runs without heartbeat for `STALE_RUN_MINUTES` (30)
-    are closed too.
-  * **resume**: a catalog sync does not refetch product pages whose details were synced less
-    than `CATALOG_RESUME_HOURS` (48) ago — it re-walks the category tree (~1.5 h for Antalis)
-    and confirms those products as seen, then continues with the rest.
-  Operations run one after the other in a single process: the crawl delay always holds.
-* Required Coolify environment variable: `SCRAPEDO_API_KEY` (secret, runtime only).
+* `api` – `catalog-scraper api` on port 8000, published by Coolify's proxy on the domain
+  `SERVICE_FQDN_API_8000` (HTTPS when the domain allows it). Requires `API_KEY`.
+* `worker` – `catalog-scraper worker`. **Does nothing until a job is requested** through the
+  API (unless `AUTO_SCHEDULE=true`, which enqueues a catalog sync every
+  `CATALOG_SYNC_INTERVAL_DAYS` and a price refresh every `PRICE_REFRESH_INTERVAL_HOURS`).
+  Both services apply migrations at start-up (serialized by a PostgreSQL advisory lock).
 
-**Redeploying / restarting** stops the running crawl immediately (the container is
-replaced). Data already written is kept (Postgres volume, one transaction per page/product);
-the new worker closes the interrupted run as `aborted` and resumes as described above.
-A redeploy during a catalog sync therefore costs ~1.5 h of listing pages, not the products.
+Coolify environment variables: `SCRAPEDO_API_KEY` and `API_KEY` (secrets), optional
+`CORS_ORIGINS`, `AUTO_SCHEDULE`, `WORKER_MAX_CONCURRENT_JOBS`, `LOG_LEVEL`.
 
-**Access / management surface**: the deployment exposes **nothing** to the internet — no
-HTTP API, no web UI, no published port; PostgreSQL is only reachable from the compose
-network. Management goes through Coolify (logs, environment variables, restart/redeploy,
-container terminal for CLI commands). To query the data from outside, prefer an SSH tunnel
-to the server (or Coolify's "make database public" with a firewall rule / read-only user)
-rather than a permanently public database.
+**Redeploying / restarting** the worker: on SIGTERM, running (or paused) jobs stop after the
+current page and end `interrupted` (90 s grace period); a job killed without notice is
+closed the same way when the worker starts again. Nothing restarts by itself: start the
+job again from the API. A new catalog sync does not refetch products synced in the last
+48 h (`resume_within_hours`): it re-walks the category tree (~1.5 h for Antalis) and
+continues with the remaining products. Data already written is kept (one transaction per
+page/product).
 
-Ad-hoc commands on the server: open the worker container terminal in Coolify and run e.g.
-`catalog-scraper runs`, `catalog-scraper prices --competitor antalis_fr --product 503623`,
-`catalog-scraper price-refresh --competitor antalis_fr --product 503623` (avoid starting a
-second crawl while the worker is crawling the same site).
+**Access**: the API is the management surface (and the frontend's backend); everything but
+`GET /api/v1/health` needs the API key. PostgreSQL stays on the compose network only; for
+ad-hoc SQL use an SSH tunnel. CLI commands can be run from the worker container terminal in
+Coolify (`catalog-scraper runs`, `... prices --competitor antalis_fr --product 503623`).
 
 ---
 
@@ -422,6 +450,11 @@ uv run ruff check src tests
   retry of failed products, identity mismatch, no-price vs failure, quantity queries,
   plus an Antalis end-to-end sync of family HQ02953 on fixtures.
 * `tests/test_scrapedo_client.py` – request format, retries, fatal errors, token redaction.
+* `tests/test_jobs_db.py` – worker jobs: one job per competitor (service and database),
+  price refresh only after a full catalog, dispatcher end to end, progress, cancel, pause /
+  resume, shutdown/restart interruption, failure guard, notifications, opt-in schedule.
+* `tests/test_api.py` – the HTTP API: auth, worker lifecycle and refusals, product search,
+  facets, CRUD, notifications read/unread, error format, `openapi.json` up to date.
 * `tests/test_live_scrapedo.py` – opt-in live checks.
 
 ---
@@ -445,5 +478,8 @@ See `docs/antalis-observations.md` for details.
 * The Antalis site has internal inconsistencies that are stored as-is (e.g. `Quantité sur
   palette` 1280 vs palette sales unit 540 for SKU 503623).
 * The crawl is sequential by design (crawl delay). A full sync of the packaging sector
-  takes hours: run it in the background / from a scheduler.
+  takes hours (~7-8 h for Antalis): start it as a worker job.
+* A paused job is held in memory: a worker restart ends it `interrupted`. Pauses have no
+  time limit.
+* The API has a single shared key (no users/roles).
 * Product matching logic is not implemented (schema only).
