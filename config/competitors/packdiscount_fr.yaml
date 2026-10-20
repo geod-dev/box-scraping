@@ -1,0 +1,59 @@
+# Packdiscount France. See README.md "Adding a competitor" for the meaning of each key.
+# Source: the Intershop REST API behind www.packdiscount.com (JSON, public, see
+# docs/packdiscount-observations.md). The adapter hard-codes the API paths.
+key: packdiscount_fr
+name: Packdiscount France
+# The crawl talks to the API host only (root URLs must be on base_url's host).
+base_url: https://api.packdiscount.com
+adapter: competitor_catalog.adapters.packdiscount:PackdiscountAdapter
+enabled: true
+
+# Entry points. The category tree is crawled from the root category; the flat product list
+# gives every master and simple product (1352 at the first discovery, 2026-10-20).
+# Variants are reached through their master's variations link.
+root_urls:
+  - https://api.packdiscount.com/INTERSHOP/rest/WFS/Packdiscount-FR-Site/rest/categories
+  - https://api.packdiscount.com/INTERSHOP/rest/WFS/Packdiscount-FR-Site/rest/products?amount=200&offset=0
+
+# api.packdiscount.com/robots.txt: "Allow: /" and no Crawl-delay. The web robots.txt has no
+# Crawl-delay either. 2 s between requests is a choice, not a site requirement.
+request_interval_seconds: 2
+max_attempts: 4
+default_currency: EUR
+
+# Catalog size observed at the first discovery (2026-10-20), only used to estimate the
+# duration of the first runs. A family costs one master page, one variations page and one
+# page per variant (price), so the product count is roughly 5 x the number of masters.
+estimate_hints:
+  listing_pages: 2700
+  products: 6100
+
+# Scrape.do request options. The JSON API answers plain datacenter requests (1 credit).
+scrapedo:
+  render: false
+  super: false
+  geo_code: fr
+  timeout_ms: 60000
+
+options:
+  # Variation attributes (variableVariationAttributes) keep internal ids such as
+  # caisse_longueur_interieur. Labels given here are the names used in the normalized
+  # mapping below; unknown ids keep the site's own name.
+  variation_attribute_labels:
+    caisse_longueur_interieur: "Longueur intérieure (cm)"
+    caisse_largeur_interieur: "Largeur intérieure (cm)"
+    caisse_hauteur_interieur: "Hauteur intérieure (cm)"
+    caisse_hauteur_maxi_cm: "Hauteur maximale (cm)"
+    caisse_quantite_palette: "Quantité sur palette"
+    caisse_qualite: "Qualité"
+    caisse_colis_de: "Colis de"
+  # Canonical normalized attribute -> labels that carry it (case and accent insensitive).
+  # Keys ending in _mm are converted from cm when the label carries the unit.
+  attribute_mapping:
+    inner_length_mm: ["Longueur intérieure (cm)"]
+    inner_width_mm: ["Largeur intérieure (cm)"]
+    inner_height_mm: ["Hauteur intérieure (cm)"]
+    max_height_mm: ["Hauteur maximale (cm)"]
+    pallet_quantity: ["Quantité sur palette"]
+    quality_code: ["Qualité"]
+    bundle_quantity: ["Colis de"]

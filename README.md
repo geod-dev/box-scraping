@@ -1,7 +1,8 @@
 # Competitor catalog scraper
 
-Scrapes competitor e-shops (starting with **Antalis France**, packaging sector) through the
-**Scrape.do** API and stores categories, products, characteristics, images and an
+Scrapes competitor e-shops (**Antalis France**, packaging sector, from its HTML; **Packdiscount
+France**, from its JSON API) through the **Scrape.do** API and stores categories, products,
+characteristics, images and an
 append-only price history in **PostgreSQL**.
 
 Two independent operations:
@@ -17,7 +18,8 @@ and ETA, CRUD on the scraped data, persisted notifications. Nothing scrapes unle
 is requested. API guide for client/frontend developers: [`docs/api/`](docs/api/README.md).
 
 Site findings (what is confirmed vs assumed) are in
-[`docs/antalis-observations.md`](docs/antalis-observations.md).
+[`docs/antalis-observations.md`](docs/antalis-observations.md) and
+[`docs/packdiscount-observations.md`](docs/packdiscount-observations.md).
 
 ---
 

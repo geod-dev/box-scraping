@@ -236,7 +236,7 @@ class ScrapeDoClient:
             requested_url=url,
             final_url=headers.get("Scrape.do-Resolved-Url") or url,
             status_code=response.status_code,
-            text=response.text,
+            text=_decode(response),
             fetched_at=datetime.now(UTC),
             meta=meta,
         )
@@ -250,6 +250,12 @@ class ScrapeDoClient:
             f"<!-- source: {page.requested_url} fetched_at: {page.fetched_at.isoformat()} -->\n" + page.text,
             encoding="utf-8",
         )
+
+
+def _decode(response: httpx.Response) -> str:
+    """Body as text. Without a charset in Content-Type httpx guesses a legacy encoding
+    (mojibake or U+FFFD on JSON APIs that send UTF-8), so UTF-8 is the default here."""
+    return response.content.decode(response.charset_encoding or "utf-8", errors="replace")
 
 
 def _int_header(response: httpx.Response, name: str) -> int | None:
