@@ -474,6 +474,7 @@ def _filtered(
     *,
     competitor: str | None,
     status: list[str] | None,
+    category_id: list[int] | None,
     q: str | None,
     antalis_q: str | None,
     antalis_product_id: int | None,
@@ -492,6 +493,11 @@ def _filtered(
         stmt = stmt.where(ProductMatch.competitor_id == competitor_id)
     if status:
         stmt = stmt.where(ProductMatch.status.in_(status))
+    if category_id:
+        # A product is in a category when its own category is that one or one of its descendants.
+        tree = select(Category.id).where(Category.id.in_(category_id)).cte("category_tree", recursive=True)
+        tree = tree.union(select(Category.id).join(tree, Category.parent_id == tree.c.id))
+        stmt = stmt.where(CompetitorProduct.category_id.in_(select(tree.c.id)))
     for word in (q or "").split():
         like = f"%{word}%"
         stmt = stmt.where(
@@ -561,6 +567,10 @@ class ListFilters:
     def __init__(
         self,
         competitor: Annotated[str | None, Query(description="competitor key")] = None,
+        category_id: Annotated[
+            list[int] | None,
+            Query(description="competitor product in one of these categories or their sub-categories, repeatable"),
+        ] = None,
         q: Annotated[str | None, Query(description="words in the competitor product title/reference/brand")] = None,
         antalis_q: Annotated[
             str | None, Query(description="words in the associated or proposed Antalis product title/reference")
@@ -578,6 +588,7 @@ class ListFilters:
     ):
         self.values = {
             "competitor": competitor,
+            "category_id": category_id,
             "q": q,
             "antalis_q": antalis_q,
             "antalis_product_id": antalis_product_id,

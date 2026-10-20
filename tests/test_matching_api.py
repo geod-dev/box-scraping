@@ -6,10 +6,10 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 
 from competitor_catalog.api.main import create_app
-from competitor_catalog.db.models import Competitor, Product
+from competitor_catalog.db.models import Category, Competitor, Product
 from competitor_catalog.db.session import transaction
 from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.services.dispatcher import Dispatcher, DispatcherConfig
@@ -281,3 +281,30 @@ def test_console_views_of_the_matches(env, factory):
     assert position["pairs"] == 1 and position["pricier"] == 1 and position["median_gap_percent"] == 10.0
     _observe(env, env.ids["P1"], "11", price_unit="UN", price_unit_quantity="1000", tax_mode="unknown")
     assert env.get("/stats/overview")["price_position"][0]["pairs"] == 0  # per 1000: not comparable
+
+
+def test_list_filtered_by_category_includes_sub_categories(env, factory):
+    with transaction(factory) as session:
+        competitor_id = session.scalar(select(Competitor.id).where(Competitor.key == "packdiscount_fr"))
+        boxes = Category(competitor_id=competitor_id, name="Boxes", url="https://example.test/boxes")
+        session.add(boxes)
+        session.flush()
+        small = Category(
+            competitor_id=competitor_id, parent_id=boxes.id, name="Small", url="https://example.test/small"
+        )
+        films = Category(competitor_id=competitor_id, name="Films", url="https://example.test/films")
+        session.add_all([small, films])
+        session.flush()
+        ids = {"boxes": boxes.id, "small": small.id, "films": films.id}
+        session.execute(update(Product).where(Product.id == env.ids["P1"]).values(category_id=small.id))
+        session.execute(update(Product).where(Product.id == env.ids["P4"]).values(category_id=films.id))
+    env.post("/matching/competitors/packdiscount_fr/run", {"mode": "incremental"}, status=202)
+    env.work()
+
+    def refs(**params):
+        return {i["product"]["catalog_reference"] for i in env.get("/matching/matches", **params)["items"]}
+
+    assert refs(category_id=ids["boxes"]) == {"P1"}
+    assert refs(category_id=ids["small"]) == {"P1"}
+    assert refs(category_id=[ids["boxes"], ids["films"]]) == {"P1", "P4"}
+    assert len(refs()) == 4
