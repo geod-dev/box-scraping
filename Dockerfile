@@ -10,6 +10,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
+# Files stay owned by root (read-only for the app, which writes nothing under /app): a
+# `chown -R` would copy the whole virtualenv into a new layer on every build.
+RUN useradd --system --uid 10001 --home /app scraper
+
 # Dependencies first (cached layer), then the project itself.
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -23,7 +27,6 @@ RUN uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH" \
     COMPETITOR_CONFIG_DIR=/app/config/competitors
 
-RUN useradd --system --uid 10001 --home /app scraper && chown -R scraper /app
 USER scraper
 
 EXPOSE 8000
