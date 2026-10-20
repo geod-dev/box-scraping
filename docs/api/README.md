@@ -308,10 +308,14 @@ corresponds to it best. A match is addressed by its **competitor product id**
 | `deprecated` | the competitor or the Antalis product changed (or disappeared) since: rerun needed | **kept as it was**, `previous_status`, `deprecated_reason` | "Obsolete" badge |
 
 `score` is a similarity score 0-100, **not a probability**: show it as a score (e.g. a gauge),
-never as "93 % sure". `decision_reasons[]` (`code` + `message`) explains the status:
-`score_above_auto`, `clear_gap`, `single_candidate`, `ambiguous_gap`, `review_band`,
-`score_below_review`, `no_compatible_candidate`, `feature_conflict`,
-`dimensions_not_comparable`, `previously_validated`, `previous_association_changed`.
+never as "93 % sure". `decision_reasons[]` (`code` + `message`, `warning: true` on a reason
+that did not block the status but deserves a look) explains the status:
+`score_above_auto`, `clear_gap`, `single_candidate`, `close_runner_up` (warning: identical
+candidate, score ≥ 99, associated automatically although the second one is close),
+`ambiguous_gap`, `review_band`, `score_below_review`, `no_compatible_candidate`,
+`feature_conflict`, `dimension_mismatch`, `dimensions_not_comparable`,
+`previously_validated`, `previous_association_changed`. A candidate whose dimensions differ
+(beyond rounding) is another product: it is excluded with a `dimension_mismatch` exclusion.
 `deprecated_reason`: `product_changed`, `antalis_product_changed`, `antalis_product_missing`,
 `antalis_product_deleted`, `reset_requested`. `outdated_config=true`: computed with an older
 configuration (the next run refreshes it).
@@ -327,10 +331,10 @@ configuration (the next run refreshes it).
   Antalis catalog state), `"deprecated"` (only the obsolete ones) or `"all"` (every engine
   result) → `202` + a job, followed like any job (`GET /jobs/{id}` or
   `GET /competitors/{key}/worker`; `task: "matching"`). Human decisions are never
-  recomputed unless deprecated. The first run embeds the whole Antalis catalog and the
-  competitor's products: with the current Voyage plan (no payment method: 10K tokens/min)
-  allow ~25 min for Antalis and ~1 h per 6 000 products, once; reruns only embed changed
-  texts and take seconds. `job.estimate` / `POST .../worker/estimate` give the figures.
+  recomputed unless deprecated. Embeddings are cached per text for every competitor: any
+  mode only embeds texts never seen before (a rerun of `"all"` after a config change embeds
+  nothing); `"reembed": true` forces every text of the run to be embedded again (paid,
+  normally never needed). `job.estimate` / `POST .../worker/estimate` give the figures.
 * `POST /matching/deprecated/rerun` (`{}` or `{"competitor": "packdiscount_fr"}`) → one
   `mode=deprecated` job per competitor having deprecated matches:
   `{"jobs": [...], "refused": [{competitor_key, code, message}], "nothing_to_do": [...]}`.
@@ -432,7 +436,7 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | GET | `/run-items` | page outcomes across runs (`competitor`, `status`, `item_type`, `product_id`, `url`) |
 | GET | `/matching/config` | thresholds, weights, model, whole matching config, `configured` |
 | GET | `/matching/summary` | matching state per competitor (`competitor`) |
-| POST | `/matching/competitors/{key}/run` | start a matching job (`{"mode"}`) |
+| POST | `/matching/competitors/{key}/run` | start a matching job (`{"mode", "reembed"}`) |
 | POST | `/matching/deprecated/rerun` | recompute the deprecated matches (`{"competitor"}` optional) |
 | GET | `/matching/matches` | all matches (filters, sort) |
 | GET | `/matching/review` | review queue (`needs_review`) |
@@ -477,5 +481,5 @@ flags anything missing.
 | `update_details` | default `true`: also re-parse descriptions/characteristics/images from the same page (no extra request); `false` = prices only |
 | `limit` | at most N products |
 
-`matching`: `mode` = `incremental` (default) | `deprecated` | `all` (see
-[Product matching](#product-matching)).
+`matching`: `mode` = `incremental` (default) | `deprecated` | `all`, `reembed` = `false`
+(default: cached embeddings reused) | `true` (see [Product matching](#product-matching)).

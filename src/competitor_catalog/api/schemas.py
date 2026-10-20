@@ -127,6 +127,12 @@ class MatchingOptionsIn(BaseModel):
         "matches; all: every engine result. Human decisions (validated/rejected) are never recomputed unless "
         "deprecated.",
     )
+    reembed: bool = Field(
+        False,
+        description="false (default): every text already embedded (by any product of any competitor) reuses its "
+        "cached vector, only new texts are sent to Voyage AI, whatever the mode. true: embed every text of the run "
+        "again and replace the cached vectors (paid; normally never needed).",
+    )
 
 
 class MatchingJobIn(BaseModel):
@@ -579,11 +585,16 @@ class ProductBriefOut(BaseModel):
 
 class ReasonOut(BaseModel):
     code: str = Field(
-        description="score_above_auto, clear_gap, single_candidate, ambiguous_gap, review_band, score_below_review, "
-        "no_compatible_candidate, feature_conflict, dimensions_not_comparable, previously_validated, "
-        "previous_association_changed"
+        description="score_above_auto, clear_gap, single_candidate, close_runner_up, ambiguous_gap, review_band, "
+        "score_below_review, no_compatible_candidate, feature_conflict, dimension_mismatch, "
+        "dimensions_not_comparable, previously_validated, previous_association_changed"
     )
     message: str
+    warning: bool = Field(
+        False,
+        description="true for a reason that did not block the status but deserves a look (close_runner_up: "
+        "associated automatically although a second candidate is close)",
+    )
 
 
 class MatchListItem(BaseModel):

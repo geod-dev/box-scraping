@@ -106,6 +106,9 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("match", help="match a competitor's products with the reference catalog (Antalis)")
     s.add_argument("--competitor", required=True)
     s.add_argument("--mode", choices=["incremental", "deprecated", "all"], default="incremental")
+    s.add_argument(
+        "--reembed", action="store_true", help="embed the texts again even when cached (paid, normally never needed)"
+    )
     s.set_defaults(func=cmd_match)
 
     s = sub.add_parser("worker", help="run migrations, then execute the jobs requested through the API")
@@ -231,7 +234,7 @@ def cmd_match(args: argparse.Namespace, settings: Any) -> int:
             ctx.factory,
             ctx.competitor_id,
             build_matching_runtime(settings),
-            MatchingOptions(args.mode),
+            MatchingOptions(args.mode, reembed=args.reembed),
             competitor_options=ctx.config.matching,
         ).run()
     except MatchingError as exc:

@@ -13,6 +13,7 @@ from competitor_catalog.db.models import (
     ProductMatch,
     ProductMatchCandidate,
     ProductMatchEvent,
+    TextEmbedding,
 )
 from competitor_catalog.db.session import transaction
 from competitor_catalog.matching import service
@@ -40,12 +41,12 @@ class Env:
         self.competitor_id = competitor_id
         self.fake = Runtime()
 
-    def run(self, mode="incremental", observer=None, runtime=None):
+    def run(self, mode="incremental", observer=None, runtime=None, reembed=False):
         return MatchingRun(
             self.factory,
             self.competitor_id,
             runtime or self.fake.runtime,
-            MatchingOptions(mode),
+            MatchingOptions(mode, reembed=reembed),
             observer or RunObserver(),
             competitor_options=PACKDISCOUNT_OPTIONS,
         ).run()
@@ -134,6 +135,35 @@ def test_rerun_without_changes_recomputes_nothing(env):
     result = env.run("all")  # engine results recomputed, embeddings still reused, same results: no event
     assert result.counters["processed"] == 4 and result.counters.get("changed", 0) == 0
     assert len(env.fake.embedder.texts) == sent and env.events("P1") == ["computed"]
+
+
+def test_embeddings_are_shared_by_text_and_only_recomputed_on_request(env):
+    env.run()
+    # another scoring config: every engine result is recomputed, no text is embedded again
+    other = Runtime(make_config(thresholds={"auto_match": 95, "min_gap": 8, "certain": 99, "review": 75}))
+    result = env.run("all", runtime=other.runtime)
+    assert result.counters["processed"] == 4 and result.counters["embeddings_computed"] == 0
+    assert other.embedder.texts == []
+    # a title changed then changed back: only the new text is paid, once
+    title = COMPETITOR[0][1]
+    env.update_product("P1", title=f"{title} brune")
+    env.run("all", runtime=other.runtime)
+    env.update_product("P1", title=title)
+    env.run("all", runtime=other.runtime)
+    assert other.embedder.texts == [f"{title} brune"]
+    # a text already embedded for another product (here an Antalis one) is reused as is
+    env.update_product("P2", title="Ruban adhésif polypropylène brun 50 mm x 66 m")
+    env.run(runtime=other.runtime)
+    assert len(other.embedder.texts) == 1
+    with transaction(env.factory) as session:
+        assert session.scalar(select(func.count()).select_from(TextEmbedding)) == 7 + 4 + 1
+        hashes = dict(session.execute(select(ProductEmbedding.product_id, ProductEmbedding.text_hash)).all())
+        assert hashes[env.ids["P2"]] == hashes[env.ids["A4"]]
+        assert session.scalar(select(func.count()).where(ProductEmbedding.embedding.is_not(None))) == 0
+    # explicit request: every text of the run is embedded again
+    result = env.run("all", runtime=other.runtime, reembed=True)
+    assert result.counters["embedding_texts_sent"] == 7 + 3  # P2 shares the text of A4
+    assert len(other.embedder.texts) == 1 + 10
 
 
 def test_changed_product_deprecates_its_match_then_rerun_only_deprecated(env):

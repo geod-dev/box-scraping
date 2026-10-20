@@ -14,7 +14,7 @@ from competitor_catalog.core.normalize import fold
 
 # Bump when the scoring code changes in a way that changes results: the next incremental run
 # then recomputes every engine result (human decisions are kept).
-ENGINE_VERSION = "2"
+ENGINE_VERSION = "3"
 FEATURE_POLICIES = ("exclude", "review")
 
 
@@ -66,10 +66,11 @@ class MatchingConfig:
     semantic_ceiling: float
     lexical_floor: float
     lexical_ceiling: float
-    dimension_full_within: float
-    dimension_zero_beyond: float
+    dimension_tolerance: float
+    dimension_mismatch_policy: str  # exclude | review
     auto_match_threshold: float
     min_gap: float
+    certain_threshold: float  # automatic even within min_gap (warning) when the second stays below
     review_threshold: float
     product_types: dict[str, tuple[str, ...]]  # type -> folded keywords
     compatible_types: frozenset[frozenset[str]]
@@ -186,10 +187,11 @@ def parse_matching_config(data: dict[str, Any]) -> MatchingConfig:
         semantic_ceiling=_float(semantic, "ceiling", 0.95),
         lexical_floor=_float(lexical, "floor", 0.0),
         lexical_ceiling=_float(lexical, "ceiling", 0.6),
-        dimension_full_within=_float(dims, "full_score_within", 0.02),
-        dimension_zero_beyond=_float(dims, "zero_score_beyond", 0.20),
+        dimension_tolerance=_float(dims, "tolerance", 0.005),
+        dimension_mismatch_policy=str(dims.get("mismatch_policy", "exclude")),
         auto_match_threshold=_float(thresholds, "auto_match", 90),
         min_gap=_float(thresholds, "min_gap", 8),
+        certain_threshold=_float(thresholds, "certain", 99),
         review_threshold=_float(thresholds, "review", 75),
         product_types=product_types,
         compatible_types=frozenset(compatible),
@@ -200,10 +202,12 @@ def parse_matching_config(data: dict[str, Any]) -> MatchingConfig:
     )
     if not config.semantic_floor < config.semantic_ceiling or not config.lexical_floor < config.lexical_ceiling:
         raise MatchingConfigError("normalization: floor must be lower than ceiling")
-    if not config.dimension_full_within < config.dimension_zero_beyond:
-        raise MatchingConfigError("dimensions: full_score_within must be lower than zero_score_beyond")
-    if not 0 <= config.review_threshold <= config.auto_match_threshold <= 100:
-        raise MatchingConfigError("thresholds: expected 0 <= review <= auto_match <= 100")
+    if not 0 <= config.dimension_tolerance < 1:
+        raise MatchingConfigError("dimensions.tolerance must be between 0 and 1")
+    if config.dimension_mismatch_policy not in FEATURE_POLICIES:
+        raise MatchingConfigError(f"dimensions.mismatch_policy must be one of {FEATURE_POLICIES}")
+    if not 0 <= config.review_threshold <= config.auto_match_threshold <= config.certain_threshold <= 100:
+        raise MatchingConfigError("thresholds: expected 0 <= review <= auto_match <= certain <= 100")
     return config
 
 

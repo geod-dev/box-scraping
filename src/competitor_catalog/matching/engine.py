@@ -8,10 +8,13 @@ For one competitor product:
 2. **Re-ranking** - each pooled candidate gets its sub-scores, its final score
    ``100 * sum(weight * sub-score)`` (weights depend on whether the dimensions are
    comparable), its differences, its exclusions (certain incompatibilities) and its review
-   flags (conflicts that forbid an automatic association).
+   flags (conflicts that forbid an automatic association). A shared measure that differs
+   (another size) is an exclusion by default.
 3. **Decision** - ``auto_matched`` when the best candidate reaches the auto threshold, leads
-   the second one by the minimum gap and has no review flag; ``needs_review`` from the
-   review threshold; ``no_match`` below.
+   the second one by the minimum gap and has no review flag; a best candidate reaching the
+   ``certain`` threshold is automatic even within the gap (with a warning reason) as long as
+   the second one stays below it; ``needs_review`` from the review threshold; ``no_match``
+   below.
 
 The score is a similarity score on a 0-100 scale, not a probability of equivalence.
 """
@@ -97,9 +100,7 @@ class ReferenceIndex:
         self.position = {doc.product_id: i for i, doc in enumerate(docs)}
         self.vectors = np.asarray(vectors, dtype=np.float32).reshape(len(docs), -1) if docs else np.zeros((0, 1))
         self.lexical = LexicalIndex([list(doc.tokens) for doc in docs])
-        self.dimensions = DimensionIndex(
-            [doc.profile for doc in docs], config.dimension_full_within, config.dimension_zero_beyond
-        )
+        self.dimensions = DimensionIndex([doc.profile for doc in docs], config.dimension_tolerance)
         digest = hashlib.sha256()
         for doc in sorted(docs, key=lambda d: d.product_id):
             digest.update(f"{doc.product_id}:{doc.product_hash};".encode())
@@ -178,10 +179,12 @@ class MatchEngine:
         semantic, lexical, dimensions = self._signals(doc, vector)
         cfg = self.config
         pool: dict[int, list[str]] = {}  # row -> signals that retrieved it
+        # Many reference products can share the same size: among them, the closest texts first.
+        same_size = dimensions.total + 0.01 * (semantic if semantic is not None else lexical)
         tops = [
             ("semantic", _top(semantic, cfg.semantic_top_k) if semantic is not None else []),
             ("lexical", _top(lexical, cfg.lexical_top_k, positive=True)),
-            ("dimensions", _top(dimensions.total, cfg.dimension_top_k, positive=True)),
+            ("dimensions", _top(np.where(dimensions.total > 0, same_size, np.nan), cfg.dimension_top_k)),
         ]
         for signal, rows in tops:
             for row in rows:
@@ -236,6 +239,19 @@ class MatchEngine:
                 {"code": "rejected_by_human", "message": "a reviewer rejected this product for this competitor product"}
             )
         review_flags = list(features.review_flags)
+        dimension_details = self.index.dimensions.details(doc.profile, dimensions, row)
+        if comparable and dimensions.mismatch(row):
+            measures = [d for d in dimension_details if d["score"] == 0]
+            mismatch = {
+                "code": "dimension_mismatch",
+                "field": ",".join(d["key"] for d in measures),
+                "message": "different dimensions: "
+                + "; ".join(
+                    f"{d['label']} {_values(d['competitor'])} vs {_values(d['reference'])} {d['unit']}"
+                    for d in measures
+                ),
+            }
+            (exclusions if cfg.dimension_mismatch_policy == "exclude" else review_flags).append(mismatch)
         either_has_dimensions = bool(doc.profile) or bool(ref.profile)
         if cfg.require_comparable_dimensions and either_has_dimensions and not comparable:
             review_flags.append(
@@ -245,7 +261,6 @@ class MatchEngine:
                     + ("both sides but not on the same measures" if doc.profile and ref.profile else "one side only"),
                 }
             )
-        dimension_details = self.index.dimensions.details(doc.profile, dimensions, row)
         differences = [
             {
                 "kind": "dimension",
@@ -311,12 +326,25 @@ class MatchEngine:
         if best.score >= cfg.auto_match_threshold:
             reasons.append(_reason("score_above_auto", f"score {best.score:g} >= {cfg.auto_match_threshold:g}"))
             blockers = []
-            if gap is not None and gap < cfg.min_gap:
+            if gap is not None and gap < cfg.min_gap and best.score >= cfg.certain_threshold > runner_up:
+                reasons.append(
+                    _reason(
+                        "close_runner_up",
+                        f"warning: second candidate only {gap:g} points behind (score {runner_up:g}), "
+                        f"associated anyway: score {best.score:g} >= {cfg.certain_threshold:g} (identical)",
+                        warning=True,
+                    )
+                )
+            elif gap is not None and gap < cfg.min_gap:
                 blockers.append(
                     _reason(
                         "ambiguous_gap",
                         f"second candidate only {gap:g} points behind (< {cfg.min_gap:g}): "
-                        "similar, not clearly equivalent",
+                        + (
+                            f"both score >= {cfg.certain_threshold:g}, nothing tells them apart"
+                            if runner_up >= cfg.certain_threshold
+                            else "similar, not clearly equivalent"
+                        ),
                     )
                 )
             elif gap is not None:
@@ -341,8 +369,12 @@ class MatchEngine:
         return MatchOutcome(status, best, runner_up, gap, reasons, stored)
 
 
-def _reason(code: str, message: str) -> dict[str, str]:
-    return {"code": code, "message": message}
+def _reason(code: str, message: str, *, warning: bool = False) -> dict[str, Any]:
+    return {"code": code, "message": message, **({"warning": True} if warning else {})}
+
+
+def _values(values: list[float] | None) -> str:
+    return " × ".join(f"{v:g}" for v in values or [])
 
 
 def _round(value: float | None, digits: int = 4) -> float | None:

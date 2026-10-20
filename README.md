@@ -418,8 +418,12 @@ competitor product to an Antalis product.
   with from/to status and product, score, actor (`engine` or the reviewer), reason and a
   JSONB snapshot of the previous state (top candidates included). Product ids are plain
   columns so the history survives the deletion of an Antalis product.
-* `product_embeddings` – one cached embedding per product (`text_hash` of model + dimensions
-  + text, `tokens` billed, float32 vector), reused while the text is unchanged.
+* `text_embeddings` – the global embedding cache: one float32 vector per embedded text
+  (`text_hash` of model + dimensions + input type + text, the text, `tokens` billed), shared
+  by every product of every competitor that has this text.
+* `product_embeddings` – the text each product was last embedded with (`text_hash`, `tokens`
+  billed when its text was new). Its `embedding` column is deprecated (vectors moved to
+  `text_embeddings` by migration 0006, no longer written).
 
 ```sql
 -- competitor prices next to the Antalis product they are associated with
@@ -476,25 +480,35 @@ products needing a human review.
    IDF learnt on the Antalis catalog, rescaled with ceiling 0.6); **dimensions** = measures
    with an explicit unit, from the normalized attributes first, else the title
    (`L x l x h` box, roll width x length, flat format, thickness µm, grammage, volume):
-   1 within 2 % relative difference, 0 beyond 20 %, worst side of a box counts, the pair
-   scores `(mean + min) / 2` of the shared measures. Only reliable measures are kept (units
-   explicit), and two products are *comparable* when they share at least one measure.
+   a measure matches when every value is the same within `dimensions.tolerance` (0.5 %:
+   rounding only, 1 mm on 230 mm) and scores 1, or 0.9 when the values only match in another
+   order (215 x 305 vs 305 x 215). Any other difference is **another product** (800 x 600 x
+   600 is not 780 x 580 x 600): the measure scores 0 and the pair scores its worst measure.
+   Only reliable measures are kept (units explicit), and two products are *comparable* when
+   they share at least one measure.
 3. *Retrieval*: the union of the 25 best candidates by embedding, 25 by lexical similarity
-   and 15 by dimensions is re-ranked (a candidate missed by one signal is caught by another).
+   and 15 with the same dimensions (closest texts first) is re-ranked (a candidate missed by
+   one signal is caught by another).
 4. *Exclusions* (certain incompatibilities, never associated): product types known on both
    sides and not compatible (`product_types` + `compatible_types` of the config: a box is
    never a tape, a tape dispenser is not a tape...), `exclude` characteristics in conflict
-   (single vs double flute), products rejected by a reviewer for this product.
+   (single vs double flute), a shared measure that differs (`dimension_mismatch`;
+   `dimensions.mismatch_policy: review` would only block the automatic association),
+   products rejected by a reviewer for this product.
 5. *Score* = `100 x Σ weight x sub-score`, weights `semantic 0.50 / lexical 0.20 /
    dimensions 0.30` when the dimensions are comparable, else `0.75 / 0.25`.
 6. *Decision*: **auto_matched** when the best score is ≥ 90, at least 8 points ahead of the
    second candidate, with no review flag (a `review` characteristic in conflict such as the
-   colour, or dimensions known on one side only / not comparable); **needs_review** from 75
-   (or ≥ 90 but ambiguous/flagged); **no_match** below 75. Each decision stores its reasons.
+   colour, or dimensions known on one side only / not comparable). A best score ≥ 99
+   (`thresholds.certain`: title and dimensions identical) is automatic even when the second
+   is closer than 8 points, with a `close_runner_up` reason (`warning: true`), unless the
+   second also reaches 99 (nothing tells them apart). **needs_review** from 75 (or ≥ 90 but
+   ambiguous/flagged); **no_match** below 75. Each decision stores its reasons.
 
 Calibration note: on real products voyage-4 separates product *families* well but barely
-separates two *sizes* of the same product (0.96 vs 0.93): the dimensions and the gap rule
-are what distinguish "equivalent" from "similar". The score is a similarity score, **not a
+separates two *sizes* of the same product (0.96 vs 0.93), and the lexical score ignores
+numbers: the dimensions (an exact comparison) are what distinguish "equivalent" from
+"similar". The score is a similarity score, **not a
 probability**; all thresholds and weights are starting points in `config/matching.yaml`,
 to tune with the validated/rejected decisions (query above).
 
@@ -508,8 +522,12 @@ to tune with the validated/rejected decisions (query above).
   Detection runs at the end of every catalog sync / price refresh job (for the synced
   competitor's matches, or for every competitor when Antalis was synced), at the start of
   every matching run, and after a product update/deletion through the API.
-* Embeddings are reused while the embedded text is unchanged (`product_embeddings.text_hash`);
-  identical texts are embedded once; each batch is committed (an interrupted run keeps them).
+* Embeddings are cached **per text, globally** (`text_embeddings`): a text already embedded
+  for any product of any competitor is never sent to Voyage again, whatever the run mode, so
+  rerunning `mode=all` after a scoring change costs no embedding, and a title changed then
+  changed back is not paid twice. Only `"reembed": true` on a run (`--reembed` in the CLI)
+  embeds its texts again and replaces the cached vectors (normally never needed). Each batch
+  is committed (an interrupted run keeps what it paid for).
 * A change of `config/matching.yaml` (or of the competitor's `matching` options, or
   `ENGINE_VERSION`) changes `config_hash`: the next incremental run recomputes the engine
   results, without deprecating anything.

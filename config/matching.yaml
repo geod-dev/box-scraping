@@ -50,14 +50,19 @@ normalization:
   lexical: {floor: 0.0, ceiling: 0.60}
 
 dimensions:
-  # Relative difference |a - b| / max(a, b) -> sub-score: 1 up to full_score_within,
-  # 0 from zero_score_beyond, linear in between. A box with one wrong dimension scores 0 on it.
-  full_score_within: 0.02
-  zero_score_beyond: 0.20
+  # Two values of a measure are the same when |a - b| / max(a, b) <= tolerance: rounding only
+  # (1 mm on 230 mm). Beyond, it is another product: 800 x 600 x 600 mm is not 780 x 580 x 600 mm.
+  # Same values in another order (215 x 305 vs 305 x 215) still match, at a 0.9 sub-score.
+  tolerance: 0.005
+  # A shared measure that differs: exclude = certain incompatibility (the candidate is excluded,
+  # still shown among the excluded ones); review = only blocks the automatic association.
+  mismatch_policy: exclude
 
 thresholds:
   auto_match: 90     # score >= 90 and ...
   min_gap: 8         # ... ahead of the second candidate by >= 8 points -> automatic association
+  certain: 99        # score >= 99 (title and dimensions identical): automatic even when the second
+                     # is within min_gap (warning reason), unless the second also reaches 99
   review: 75         # 75 <= score (or >= 90 but ambiguous / conflicting) -> human review
                      # below 75 -> no association
 

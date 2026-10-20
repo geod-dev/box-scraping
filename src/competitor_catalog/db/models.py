@@ -320,18 +320,43 @@ class ScrapeObservation(Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, server_default=text("'{}'::jsonb"))
 
 
+class TextEmbedding(Base):
+    """Embedding of one exact text, shared by every product (of any competitor) with that text.
+    Never recomputed unless a run explicitly asks for it (``reembed``)."""
+
+    __tablename__ = "text_embeddings"
+    __table_comment__ = "Global embedding cache: one row per embedded text (model and dimensions in the hash)"
+
+    text_hash: Mapped[str] = mapped_column(
+        Text, primary_key=True, comment="sha256 of model, dimensions, input type and text"
+    )
+    model: Mapped[str] = mapped_column(Text)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str | None] = mapped_column(Text, comment="the embedded text (null for rows migrated from 0005)")
+    tokens: Mapped[int | None] = mapped_column(Integer, comment="tokens billed for this text (estimated share)")
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, comment="float32 little-endian, L2-normalized")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ProductEmbedding(Base):
-    """Cached embedding of a product's matching text, reused while ``text_hash`` is unchanged."""
+    """The text embedded for each product: its vector is ``text_embeddings[text_hash]``."""
 
     __tablename__ = "product_embeddings"
-    __table_comment__ = "Embedding of each product's matching text (title + description), reused while unchanged"
+    __table_comment__ = "Text embedded for each product (vector in text_embeddings)"
 
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), primary_key=True)
     model: Mapped[str] = mapped_column(Text)
     dimensions: Mapped[int] = mapped_column(Integer)
     text_hash: Mapped[str] = mapped_column(Text, comment="sha256 of model, dimensions, input type and text")
-    tokens: Mapped[int | None] = mapped_column(Integer, comment="tokens billed for this text (null = shared/unknown)")
-    embedding: Mapped[bytes] = mapped_column(LargeBinary, comment="float32 little-endian, L2-normalized")
+    tokens: Mapped[int | None] = mapped_column(
+        Integer, comment="tokens billed when this product's text was embedded (null = reused)"
+    )
+    # Deprecated (0006): vectors live in text_embeddings. Kept nullable for the previous release
+    # during a deploy; no longer written, dropped by a later migration.
+    embedding: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, comment="deprecated: vectors are in text_embeddings (dropped by a later migration)"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

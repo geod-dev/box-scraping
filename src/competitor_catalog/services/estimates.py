@@ -272,13 +272,19 @@ def estimate_matching(
             ProductEmbedding.model == matching_config.embedding.model,
             ProductEmbedding.dimensions == matching_config.embedding.dimensions,
         ]
+    reembed = bool(options.get("reembed"))
     missing = ~select(ProductEmbedding.product_id).where(*model_filter).exists()
-    embeddings = min(products, count(eligible.where(missing)))
+    embeddings = products if reembed else min(products, count(eligible.where(missing)))
     reference = reference_competitor(session, matching_config) if matching_config else None
     if reference is not None:
-        reference_missing = count(eligible_products(reference.id).where(missing))
+        reference_rows = eligible_products(reference.id)
+        reference_missing = count(reference_rows if reembed else reference_rows.where(missing))
         embeddings += reference_missing
-        basis.append(f"{reference_missing} reference product(s) without embedding")
+        basis.append(
+            f"reembed: {reference_missing} reference product(s) embedded again"
+            if reembed
+            else f"{reference_missing} reference product(s) without embedding"
+        )
     settings = matching_config.embedding if matching_config else EmbeddingSettings()
     tokens = embeddings * EMBEDDING_TOKENS_PER_TEXT
     per_request = max(1, min(settings.batch_size, settings.batch_token_budget // EMBEDDING_TOKENS_PER_TEXT))
@@ -292,8 +298,8 @@ def estimate_matching(
     )
     basis.append(
         f"{embeddings} text(s) to embed (~{tokens} tokens) in {requests} Voyage request(s) at "
-        f"{settings.requests_per_minute} requests / {settings.tokens_per_minute} tokens per minute; "
-        "other embeddings are reused"
+        f"{settings.requests_per_minute} requests / {settings.tokens_per_minute} tokens per minute"
+        + ("" if reembed else "; texts already embedded (by any product) are reused")
     )
     return Estimate(
         task="matching",

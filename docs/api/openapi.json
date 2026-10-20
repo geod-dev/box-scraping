@@ -3463,7 +3463,7 @@
           "matching"
         ],
         "summary": "Match the products of a competitor",
-        "description": "Queues a matching job (followed like any job: ``GET /jobs/{id}``, worker endpoints,\nnotifications). Default mode ``incremental``: what changed since the last run only.\n\nRefusals (HTTP 409): ``matching_reference``, ``catalog_required`` (no full catalog sync of\nthe competitor yet: its products are not parsed), ``reference_catalog_required``,\n``reference_missing``, ``matching_not_configured``, ``worker_busy``, ``competitor_disabled``.\nAt the end, a ``matching_summary`` notification gives the number of products to review.",
+        "description": "Queues a matching job (followed like any job: ``GET /jobs/{id}``, worker endpoints,\nnotifications). Default mode ``incremental``: what changed since the last run only.\nWhatever the mode, texts already embedded are never sent to Voyage AI again unless\n``reembed`` is true: rerunning ``mode=all`` after a scoring change costs no embedding.\n\nRefusals (HTTP 409): ``matching_reference``, ``catalog_required`` (no full catalog sync of\nthe competitor yet: its products are not parsed), ``reference_catalog_required``,\n``reference_missing``, ``matching_not_configured``, ``worker_busy``, ``competitor_disabled``.\nAt the end, a ``matching_summary`` notification gives the number of products to review.",
         "operationId": "run_matching_api_v1_matching_competitors__key__run_post",
         "security": [
           {
@@ -3498,6 +3498,10 @@
                   },
                   {
                     "mode": "all"
+                  },
+                  {
+                    "mode": "all",
+                    "reembed": true
                   }
                 ]
               }
@@ -8727,6 +8731,12 @@
             "title": "Mode",
             "description": "incremental: products never matched, deprecated matches and engine results computed with another configuration or reference catalog state (the normal case); deprecated: only the deprecated matches; all: every engine result. Human decisions (validated/rejected) are never recomputed unless deprecated.",
             "default": "incremental"
+          },
+          "reembed": {
+            "type": "boolean",
+            "title": "Reembed",
+            "description": "false (default): every text already embedded (by any product of any competitor) reuses its cached vector, only new texts are sent to Voyage AI, whatever the mode. true: embed every text of the run again and replace the cached vectors (paid; normally never needed).",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -11192,11 +11202,17 @@
           "code": {
             "type": "string",
             "title": "Code",
-            "description": "score_above_auto, clear_gap, single_candidate, ambiguous_gap, review_band, score_below_review, no_compatible_candidate, feature_conflict, dimensions_not_comparable, previously_validated, previous_association_changed"
+            "description": "score_above_auto, clear_gap, single_candidate, close_runner_up, ambiguous_gap, review_band, score_below_review, no_compatible_candidate, feature_conflict, dimension_mismatch, dimensions_not_comparable, previously_validated, previous_association_changed"
           },
           "message": {
             "type": "string",
             "title": "Message"
+          },
+          "warning": {
+            "type": "boolean",
+            "title": "Warning",
+            "description": "true for a reason that did not block the status but deserves a look (close_runner_up: associated automatically although a second candidate is close)",
+            "default": false
           }
         },
         "type": "object",

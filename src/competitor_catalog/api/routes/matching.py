@@ -365,13 +365,13 @@ def get_summary(
 # --------------------------------------------------------------------------- runs
 
 
-def _enqueue(session: Session, key: str, mode: str, configs: dict, matching: MatchingRuntime):
+def _enqueue(session: Session, key: str, options: dict, configs: dict, matching: MatchingRuntime):
     competitor = competitor_or_404(session, key)
     config = configs.get(competitor.key)
     if config is None:
         raise ApiError(409, "competitor_not_configured", f"no configuration file for {competitor.key}")
     job = job_service.enqueue_job(
-        session, competitor, config, "matching", {"mode": mode}, requested_by="api", matching=matching
+        session, competitor, config, "matching", options, requested_by="api", matching=matching
     )
     return competitor, job
 
@@ -390,11 +390,20 @@ def run_matching(
     matching: MatchingDep,
     body: Annotated[
         schemas.MatchingOptionsIn,
-        Body(examples=[{"mode": "incremental"}, {"mode": "deprecated"}, {"mode": "all"}]),
+        Body(
+            examples=[
+                {"mode": "incremental"},
+                {"mode": "deprecated"},
+                {"mode": "all"},
+                {"mode": "all", "reembed": True},
+            ]
+        ),
     ] = None,
 ):
     """Queues a matching job (followed like any job: ``GET /jobs/{id}``, worker endpoints,
     notifications). Default mode ``incremental``: what changed since the last run only.
+    Whatever the mode, texts already embedded are never sent to Voyage AI again unless
+    ``reembed`` is true: rerunning ``mode=all`` after a scoring change costs no embedding.
 
     Refusals (HTTP 409): ``matching_reference``, ``catalog_required`` (no full catalog sync of
     the competitor yet: its products are not parsed), ``reference_catalog_required``,
@@ -402,7 +411,7 @@ def run_matching(
     At the end, a ``matching_summary`` notification gives the number of products to review."""
     body = body or schemas.MatchingOptionsIn()
     try:
-        competitor, job = _enqueue(session, key, body.mode, configs, matching)
+        competitor, job = _enqueue(session, key, body.model_dump(), configs, matching)
     except job_service.JobRequestError as exc:
         raise job_refusal(exc) from None
     session.commit()
@@ -446,7 +455,7 @@ def rerun_deprecated(
             continue
         try:
             with session.begin_nested():
-                competitor, job = _enqueue(session, competitor_key, "deprecated", configs, matching)
+                competitor, job = _enqueue(session, competitor_key, {"mode": "deprecated"}, configs, matching)
             result.jobs.append(views.job_out(job, competitor.key))
         except (job_service.JobRequestError, ApiError) as exc:
             result.refused.append(

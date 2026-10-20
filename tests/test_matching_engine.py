@@ -11,7 +11,7 @@ import pytest
 from competitor_catalog.matching.config import MatchingConfigError, parse_matching_config
 from competitor_catalog.matching.dimensions import DimensionIndex, extract_profile, parse_title
 from competitor_catalog.matching.embeddings import EmbeddingCache, EmbeddingError, RateLimiter, VoyageEmbedder
-from competitor_catalog.matching.engine import MatchEngine, ReferenceIndex, build_doc
+from competitor_catalog.matching.engine import Candidate, MatchEngine, ReferenceIndex, build_doc
 from competitor_catalog.matching.features import compare_features, detect_type, extract_features
 from competitor_catalog.matching.lexical import LexicalIndex
 from competitor_catalog.matching.text import (
@@ -40,6 +40,8 @@ def source(pid, title, description=None, attrs=None, category=None, competitor_i
 def test_shipped_config_is_valid_and_hash_tracks_changes():
     assert CONFIG.reference_competitor == "antalis_fr"
     assert CONFIG.auto_match_threshold == 90 and CONFIG.min_gap == 8 and CONFIG.review_threshold == 75
+    assert CONFIG.certain_threshold == 99
+    assert CONFIG.dimension_tolerance == 0.005 and CONFIG.dimension_mismatch_policy == "exclude"
     assert CONFIG.weights_with_dimensions == {"semantic": 0.5, "lexical": 0.2, "dimensions": 0.3}
     assert CONFIG.weights_without_dimensions == {"semantic": 0.75, "lexical": 0.25}
     other = make_config(thresholds={"auto_match": 92, "min_gap": 8, "review": 75})
@@ -52,6 +54,8 @@ def test_shipped_config_is_valid_and_hash_tracks_changes():
     [
         {"weights": {"with_dimensions": {"semantic": 0.5, "lexical": 0.2, "dimensions": 0.2}}},
         {"thresholds": {"auto_match": 70, "review": 80}},
+        {"thresholds": {"auto_match": 90, "certain": 85, "review": 75}},
+        {"dimensions": {"tolerance": 0.005, "mismatch_policy": "maybe"}},
         {"features": {"color": {"policy": "maybe", "values": {"a": ["b"]}}}},
         {"compatible_types": [["box", "spaceship"]]},
     ],
@@ -146,14 +150,63 @@ def test_dimension_scores():
         extract_profile("Ruban 50 mm x 66 m", None),
         extract_profile("Caisse", None),
     ]
-    index = DimensionIndex(profiles, CONFIG.dimension_full_within, CONFIG.dimension_zero_beyond)
-    scores = index.score(extract_profile("Caisse 30,5 x 21,5 x 10,6 cm", None))
-    assert scores.total[0] == pytest.approx(1.0)  # 1 mm on 105 mm: within 2 %
-    assert scores.total[1] == pytest.approx(0.0)  # height 38 % off: another box
+    index = DimensionIndex(profiles, CONFIG.dimension_tolerance)
+    scores = index.score(extract_profile("Caisse 30,5 x 21,5 x 10,5 cm", None))
+    assert scores.total[0] == pytest.approx(1.0)  # same box, written in cm
+    assert scores.total[1] == 0 and scores.mismatch(1)  # height 38 % off: another box
     assert scores.total[2] == pytest.approx(0.9)  # unordered: penalized
     assert np.isnan(scores.total[3]) and np.isnan(scores.total[4])  # not comparable
+    assert not scores.mismatch(3)
     details = index.details(extract_profile("Caisse 305 x 215 x 105 mm", None), scores, 1)
     assert details[0]["key"] == "box_mm" and details[0]["relative_difference"] == pytest.approx(0.3824, abs=1e-3)
+    # Not the same numbers, not the same product: 1 mm on 105 mm is already another box...
+    assert index.score(extract_profile("Caisse 30,5 x 21,5 x 10,6 cm", None)).total[0] == 0
+    # ... while rounding stays tolerated (1 mm on 230 mm).
+    flat = DimensionIndex([extract_profile("Enveloppe 229 x 324 mm", None)], CONFIG.dimension_tolerance)
+    assert flat.score(extract_profile("Enveloppe 230 x 325 mm", None)).total[0] == 1
+
+
+def test_a_box_with_close_but_different_dimensions_is_another_product():
+    titles = ["Caisse carton double cannelure 780 x 580 x 600 mm", "Caisse carton double cannelure 800 x 600 x 600 mm"]
+    embedder = FakeEmbedder(CONFIG.embedding)
+
+    def match(config):
+        refs = [build_doc(source(i, t, category="Caisses"), TextOptions(), config) for i, t in enumerate(titles, 1)]
+        vectors = embedder.embed([d.embedding_text for d in refs]).vectors
+        doc = build_doc(source(9, titles[1], category="Caisses"), TextOptions(), config)
+        return MatchEngine(config, ReferenceIndex(refs, vectors, config)).match(
+            doc, embedder.embed([doc.embedding_text]).vectors[0]
+        )
+
+    outcome = match(CONFIG)
+    assert outcome.status == "auto_matched" and outcome.best.product_id == 2 and outcome.score == 100
+    other = next(c for c in outcome.candidates if c.product_id == 1)
+    assert other.excluded and other.dimensions == 0 and other.rank is None
+    assert other.exclusions[0]["code"] == "dimension_mismatch"
+    assert "800 × 600 × 600 vs 780 × 580 × 600 mm" in other.exclusions[0]["message"]
+    review = match(make_config(dimensions={"tolerance": 0.005, "mismatch_policy": "review"}))
+    other = next(c for c in review.candidates if c.product_id == 1)
+    assert not other.excluded and other.review_flags[-1]["code"] == "dimension_mismatch"
+
+
+def _decide(scores):
+    engine, _ = _engine()
+    candidates = [
+        Candidate(i, score, 1.0, 1.0, 1.0, False, [], [], {"semantic": {"cosine": 0.9}, "lexical": {"cosine": 0.9}})
+        for i, score in enumerate(scores, 1)
+    ]
+    return engine._decide(candidates)
+
+
+def test_identical_candidate_is_automatic_even_with_a_close_second():
+    outcome = _decide([100, 96.35])
+    assert outcome.status == "auto_matched" and outcome.best.product_id == 1
+    warning = next(r for r in outcome.reasons if r["code"] == "close_runner_up")
+    assert warning["warning"] is True and "96.35" in warning["message"]
+    assert _decide([97, 93]).status == "needs_review"  # below "certain": the gap rule applies
+    tie = _decide([100, 99.5])  # two identical candidates: nothing tells them apart
+    assert tie.status == "needs_review"
+    assert "nothing tells them apart" in next(r for r in tie.reasons if r["code"] == "ambiguous_gap")["message"]
 
 
 # --------------------------------------------------------------------------- features
@@ -238,9 +291,10 @@ def test_equivalent_box_is_auto_matched_and_similar_ones_explained():
     outcome = engine.match(doc, embedder.embed([doc.embedding_text]).vectors[0])
     best = outcome.best
     assert best.product_id == 1 and best.score >= 90 and best.dimensions == pytest.approx(1.0)
-    assert {r["code"] for r in outcome.reasons} == {"score_above_auto", "clear_gap"}
+    # the other sizes and the double flute box are excluded: no compatible competitor left
+    assert {r["code"] for r in outcome.reasons} == {"score_above_auto", "single_candidate"}
     other_size = next(c for c in outcome.candidates if c.product_id == 2)
-    assert other_size.dimensions == 0 and other_size.score < 75
+    assert other_size.dimensions == 0 and other_size.excluded and other_size.score < 75
     assert other_size.details["differences"][0]["field"] == "box_mm"
     double = next(c for c in outcome.candidates if c.product_id == 3)
     assert double.excluded and double.exclusions[0]["field"] == "flute_wall" and double.rank is None

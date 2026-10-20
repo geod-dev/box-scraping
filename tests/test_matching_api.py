@@ -215,7 +215,7 @@ def test_prerequisites_through_the_api(env):
         )
     # the generic worker endpoint starts a matching too
     job = env.post("/competitors/packdiscount_fr/worker/start", {"task": "matching"}, status=202)
-    assert job["task"] == "matching" and job["options"] == {"mode": "incremental"}
+    assert job["task"] == "matching" and job["options"] == {"mode": "incremental", "reembed": False}
     estimate = env.post(
         "/competitors/packdiscount_fr/worker/estimate", {"task": "matching", "options": {"mode": "all"}}
     )

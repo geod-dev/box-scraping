@@ -1,9 +1,11 @@
-"""Embeddings: the Voyage AI client and the per-product cache (``product_embeddings``).
+"""Embeddings: the Voyage AI client and the global cache.
 
-An embedding is reused as long as the text hash (model + dimensions + input type + text) of
-the product is unchanged, so a rerun only pays for the products whose title/description
-changed. Identical texts are embedded once per batch. Each batch is committed as soon as it
-is computed: an interrupted run does not lose the tokens already spent.
+``text_embeddings`` maps a text hash (model + dimensions + input type + text) to its vector,
+for every competitor: a text is embedded once, ever, and reused by every product that has it
+(again after a change back, a deletion or a re-creation). ``product_embeddings`` only records
+which text each product was matched with. A run never re-embeds a known text unless it asks
+for it (``reembed``). Each batch is committed as soon as it is computed: an interrupted run
+does not lose the tokens already spent.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from competitor_catalog.db.models import ProductEmbedding
+from competitor_catalog.db.models import ProductEmbedding, TextEmbedding
 from competitor_catalog.db.session import transaction
 from competitor_catalog.logging_setup import redact, register_secret
 from competitor_catalog.matching.config import EmbeddingSettings
@@ -202,22 +204,34 @@ class EmbeddingStats:
         }
 
 
-def load_cached(
-    session: Session, product_ids: Iterable[int], settings: EmbeddingSettings
-) -> dict[int, tuple[str, np.ndarray]]:
-    """product id -> (text hash, vector) for the cached embeddings of the configured model."""
+def load_vectors(session: Session, hashes: Iterable[str]) -> dict[str, np.ndarray]:
+    """text hash -> vector, for the hashes already in the global cache."""
+    keys = sorted(set(hashes))
+    result: dict[str, np.ndarray] = {}
+    for start in range(0, len(keys), 2000):
+        rows = session.execute(
+            select(TextEmbedding.text_hash, TextEmbedding.embedding).where(
+                TextEmbedding.text_hash.in_(keys[start : start + 2000])
+            )
+        )
+        for hash_, blob in rows:
+            result[hash_] = from_blob(blob)
+    return result
+
+
+def load_links(session: Session, product_ids: Iterable[int], settings: EmbeddingSettings) -> dict[int, str]:
+    """product id -> hash of the text it was last embedded with (configured model)."""
     ids = list(product_ids)
-    result: dict[int, tuple[str, np.ndarray]] = {}
+    result: dict[int, str] = {}
     for start in range(0, len(ids), 2000):
         rows = session.execute(
-            select(ProductEmbedding.product_id, ProductEmbedding.text_hash, ProductEmbedding.embedding).where(
+            select(ProductEmbedding.product_id, ProductEmbedding.text_hash).where(
                 ProductEmbedding.product_id.in_(ids[start : start + 2000]),
                 ProductEmbedding.model == settings.model,
                 ProductEmbedding.dimensions == settings.dimensions,
             )
         )
-        for product_id, hash_, blob in rows:
-            result[product_id] = (hash_, from_blob(blob))
+        result.update({pid: hash_ for pid, hash_ in rows})
     return result
 
 
@@ -231,35 +245,31 @@ class EmbeddingCache:
         self,
         texts: dict[int, str],
         *,
+        reembed: bool = False,
         progress: Callable[[int, int], None] | None = None,
         check_stop: Callable[[], None] | None = None,
         stats: EmbeddingStats | None = None,
     ) -> dict[int, np.ndarray]:
-        """Vectors of every product id of ``texts`` (product id -> matching text), computing only
-        the missing or outdated ones."""
+        """Vectors of every product id of ``texts`` (product id -> matching text). Only the texts
+        missing from the global cache are sent to the provider; ``reembed`` sends them all again
+        (and replaces the cached vectors)."""
         stats = stats if stats is not None else EmbeddingStats()
         hashes = {pid: text_hash(text, self.settings) for pid, text in texts.items()}
         with transaction(self.factory) as session:
-            cached = load_cached(session, texts, self.settings)
+            known = {} if reembed else load_vectors(session, hashes.values())
+            linked = load_links(session, texts, self.settings)
         vectors: dict[int, np.ndarray] = {}
         pending: dict[str, list[int]] = {}  # text hash -> products sharing that text
+        relinked: list[tuple[int, str, int | None]] = []
         for pid, hash_ in hashes.items():
-            hit = cached.get(pid)
-            if hit is not None and hit[0] == hash_:
-                vectors[pid] = hit[1]
+            if hash_ in known:
+                vectors[pid] = known[hash_]
                 stats.reused += 1
+                if linked.get(pid) != hash_:
+                    relinked.append((pid, hash_, None))
             else:
                 pending.setdefault(hash_, []).append(pid)
-        # identical text already cached on another product: copy it, no API call
-        by_hash = {h: v for h, v in cached.values()}
-        copied = [(h, pids) for h, pids in pending.items() if h in by_hash]
-        if copied:
-            self._store([(pid, h, by_hash[h], None) for h, pids in copied for pid in pids])
-            for h, pids in copied:
-                for pid in pids:
-                    vectors[pid] = by_hash[h]
-                del pending[h]
-            stats.reused += sum(len(pids) for _h, pids in copied)
+        self._store([], relinked)
         batches = self._batches([(h, texts[pids[0]]) for h, pids in pending.items()])
         total = sum(len(pids) for pids in pending.values())
         done = 0
@@ -272,18 +282,18 @@ class EmbeddingCache:
             stats.requests += 1
             stats.tokens += result.tokens
             stats.texts_sent += len(batch)
-            rows = []
+            embedded, links = [], []
             batch_chars = max(1, sum(len(t) for _h, t in batch))
             for (hash_, text), vector in zip(batch, result.vectors, strict=True):
-                pids = pending[hash_]
                 # tokens are billed per request: attribute them to texts pro rata of their length
                 share = round(result.tokens * len(text) / batch_chars)
-                for i, pid in enumerate(pids):
-                    rows.append((pid, hash_, vector, share if i == 0 else None))
+                embedded.append((hash_, text, vector, share))
+                for i, pid in enumerate(pending[hash_]):
+                    links.append((pid, hash_, share if i == 0 else None))
                     vectors[pid] = vector
-            self._store(rows)
-            stats.computed += len(rows)
-            done += len(rows)
+            self._store(embedded, links)
+            stats.computed += len(links)
+            done += len(links)
             if progress:
                 progress(done, total)
         return vectors
@@ -304,28 +314,54 @@ class EmbeddingCache:
             batches.append(current)
         return batches
 
-    def _store(self, rows: list[tuple[int, str, np.ndarray, int | None]]) -> None:
-        if not rows:
+    def _store(
+        self, embedded: list[tuple[str, str, np.ndarray, int]], links: list[tuple[int, str, int | None]]
+    ) -> None:
+        """New vectors into the global cache and the text of each product, in one transaction."""
+        if not embedded and not links:
             return
         now = utcnow()
-        values = [
-            {
-                "product_id": pid,
-                "model": self.settings.model,
-                "dimensions": self.settings.dimensions,
-                "text_hash": hash_,
-                "tokens": tokens,
-                "embedding": to_blob(vector),
-                "updated_at": now,
-            }
-            for pid, hash_, vector, tokens in rows
-        ]
-        stmt = insert(ProductEmbedding).values(values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["product_id"],
-            set_={
-                c: stmt.excluded[c] for c in ("model", "dimensions", "text_hash", "tokens", "embedding", "updated_at")
-            },
-        )
         with transaction(self.factory) as session:
-            session.execute(stmt)
+            if embedded:
+                stmt = insert(TextEmbedding).values(
+                    [
+                        {
+                            "text_hash": hash_,
+                            "model": self.settings.model,
+                            "dimensions": self.settings.dimensions,
+                            "text": text,
+                            "tokens": tokens,
+                            "embedding": to_blob(vector),
+                            "updated_at": now,
+                        }
+                        for hash_, text, vector, tokens in embedded
+                    ]
+                )
+                session.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["text_hash"],
+                        set_={c: stmt.excluded[c] for c in ("text", "tokens", "embedding", "updated_at")},
+                    )
+                )
+            for start in range(0, len(links), 1000):
+                stmt = insert(ProductEmbedding).values(
+                    [
+                        {
+                            "product_id": pid,
+                            "model": self.settings.model,
+                            "dimensions": self.settings.dimensions,
+                            "text_hash": hash_,
+                            "tokens": tokens,
+                            "updated_at": now,
+                        }
+                        for pid, hash_, tokens in links[start : start + 1000]
+                    ]
+                )
+                columns = ("model", "dimensions", "text_hash", "tokens", "updated_at")
+                session.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["product_id"],
+                        # the deprecated per-product copy of the vector is dropped as products relink
+                        set_={**{c: stmt.excluded[c] for c in columns}, "embedding": None},
+                    )
+                )

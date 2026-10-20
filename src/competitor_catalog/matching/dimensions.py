@@ -4,10 +4,11 @@ A profile holds canonical measures (``box_mm`` = L x l x h, ``width_mm`` + ``len
 roll...). Only values with an explicit unit are kept, so every measure is reliable; two
 products are *comparable* when they share at least one measure.
 
-Each shared measure scores 1 when the relative difference ``|a - b| / max(a, b)`` is within
-``full_score_within``, 0 beyond ``zero_score_beyond`` (linear in between); a multi-value
-measure takes its worst value (one wrong side = another box). The dimension score of a pair
-is ``(mean + min) / 2`` of its measures, so a single mismatching measure weighs heavily.
+A shared measure matches when every value has a relative difference ``|a - b| / max(a, b)``
+within ``tolerance`` (rounding only): it scores 1, or 0.9 when the values only match in another
+order (215 x 305 vs 305 x 215). Any other difference is another product (800 x 600 x 600 is not
+780 x 580 x 600): the measure scores 0. The dimension score of a pair is its worst measure, so
+0 means a mismatch.
 """
 
 from __future__ import annotations
@@ -137,8 +138,9 @@ def extract_profile(title: str | None, normalized_attributes: dict[str, Any] | N
     return DimensionProfile(values, sources)
 
 
-def measure_scores(rel_diff: np.ndarray, full: float, zero: float) -> np.ndarray:
-    return np.clip(1.0 - (rel_diff - full) / (zero - full), 0.0, 1.0)
+def measure_scores(rel_diff: np.ndarray, tolerance: float) -> np.ndarray:
+    """1 where the values are the same (within the rounding tolerance), 0 elsewhere; NaN kept."""
+    return np.where(np.isnan(rel_diff), np.nan, (rel_diff <= tolerance).astype(float))
 
 
 def _rel_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -150,17 +152,20 @@ def _rel_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 class DimensionScores:
     """Scores of one profile against every row of a :class:`DimensionIndex`."""
 
-    total: np.ndarray  # (m,) NaN = not comparable
+    total: np.ndarray  # (m,) NaN = not comparable, 0 = a shared measure differs
     per_key: dict[str, np.ndarray]  # key -> (m,) NaN = measure absent on that row
 
     def comparable(self, row: int) -> bool:
         return not np.isnan(self.total[row])
 
+    def mismatch(self, row: int) -> bool:
+        return bool(self.total[row] == 0)
+
 
 class DimensionIndex:
-    def __init__(self, profiles: list[DimensionProfile], full: float, zero: float):
+    def __init__(self, profiles: list[DimensionProfile], tolerance: float):
         self.profiles = profiles
-        self.full, self.zero = full, zero
+        self.tolerance = tolerance
         m = len(profiles)
         self.arrays: dict[str, np.ndarray] = {}
         self.sorted_arrays: dict[str, np.ndarray] = {}
@@ -182,22 +187,19 @@ class DimensionIndex:
             query = np.array(value, dtype=float)
             if array.shape[1] != len(query):
                 continue
-            scores = measure_scores(_rel_diff(array, query), self.full, self.zero).min(axis=1)
+            scores = measure_scores(_rel_diff(array, query), self.tolerance).min(axis=1)
             if len(query) > 1:
-                swapped = measure_scores(
-                    _rel_diff(self.sorted_arrays[key], -np.sort(-query)), self.full, self.zero
-                ).min(axis=1)
+                swapped = measure_scores(_rel_diff(self.sorted_arrays[key], -np.sort(-query)), self.tolerance).min(
+                    axis=1
+                )
                 scores = np.fmax(scores, swapped * UNORDERED_PENALTY)
             per_key[key] = scores  # NaN where the row lacks the measure
         if not per_key:
             return DimensionScores(np.full(m, np.nan), per_key)
         stacked = np.vstack(list(per_key.values()))
         present = ~np.isnan(stacked)
-        count = present.sum(axis=0)
-        filled = np.where(present, stacked, 0.0)
-        mean = np.divide(filled.sum(axis=0), count, out=np.zeros(m), where=count > 0)
         minimum = np.where(present, stacked, np.inf).min(axis=0)
-        total = np.where(count > 0, (mean + minimum) / 2, np.nan)
+        total = np.where(present.any(axis=0), minimum, np.nan)
         return DimensionScores(total, per_key)
 
     def details(self, profile: DimensionProfile, scores: DimensionScores, row: int) -> list[dict[str, Any]]:

@@ -45,10 +45,10 @@ from competitor_catalog.db.models import (
 from competitor_catalog.db.session import transaction
 from competitor_catalog.matching.config import MatchingConfig
 from competitor_catalog.matching.dimensions import extract_profile
-from competitor_catalog.matching.embeddings import Embedder, EmbeddingCache, EmbeddingStats, load_cached
+from competitor_catalog.matching.embeddings import Embedder, EmbeddingCache, EmbeddingStats, load_vectors
 from competitor_catalog.matching.engine import MatchEngine, MatchOutcome, ProductDoc, ReferenceIndex, build_doc
 from competitor_catalog.matching.features import detect_type
-from competitor_catalog.matching.text import ProductSource, TextOptions, product_hash
+from competitor_catalog.matching.text import ProductSource, TextOptions, product_hash, text_hash
 from competitor_catalog.services.notifications import notify
 from competitor_catalog.services.runs import NULL_OBSERVER, RunObserver, utcnow
 
@@ -98,10 +98,15 @@ class MatchingRuntime:
 @dataclass
 class MatchingOptions:
     mode: str = "incremental"  # incremental | deprecated | all
+    # Embed again the texts of this run even when cached (paid): only to change what a known
+    # text's vector is, e.g. after a provider-side model update. Never needed for a rerun.
+    reembed: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {list(MODES)}")
+        if not isinstance(self.reembed, bool):
+            raise ValueError("reembed must be a boolean")
 
 
 # --------------------------------------------------------------------------- eligibility
@@ -560,6 +565,7 @@ class MatchingRun:
         try:
             vectors = EmbeddingCache(self.factory, embedder).ensure(
                 texts,
+                reembed=self.options.reembed,
                 progress=lambda done, total: self._report("embed", done, total),
                 check_stop=self.observer.check_stop,
                 stats=self.embedding_stats,
@@ -977,15 +983,12 @@ def compare_with(
         reference_sources += sources_by_id(session, [target.id]).values()
     reference_docs = [build_doc(s, text_options(config, None), config) for s in reference_sources]
     doc = build_doc(sources_by_id(session, [product.id])[product.id], text_options(config, competitor_options), config)
-    cached = load_cached(session, [d.product_id for d in reference_docs] + [doc.product_id], config.embedding)
+    hashes = {d.product_id: text_hash(d.embedding_text, config.embedding) for d in [*reference_docs, doc]}
+    cached = load_vectors(session, hashes.values())
+    found = {pid: cached[h] for pid, h in hashes.items() if h in cached}
     dims = config.embedding.dimensions
-    has_vectors = doc.product_id in cached and target.id in cached
-    vectors = np.vstack(
-        [
-            cached[d.product_id][1] if d.product_id in cached else np.zeros(dims, dtype=np.float32)
-            for d in reference_docs
-        ]
-    )
+    has_vectors = doc.product_id in found and target.id in found
+    vectors = np.vstack([found.get(d.product_id, np.zeros(dims, dtype=np.float32)) for d in reference_docs])
     engine = MatchEngine(config, ReferenceIndex(reference_docs, vectors, config))
-    candidate = engine.compare(doc, cached[doc.product_id][1] if has_vectors else None, target.id)
+    candidate = engine.compare(doc, found[doc.product_id] if has_vectors else None, target.id)
     return doc, candidate
