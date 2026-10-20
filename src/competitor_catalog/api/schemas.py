@@ -97,7 +97,11 @@ class PriceRefreshOptionsIn(BaseModel):
     retry_failed_run_id: int | None = Field(None, description="only the products that failed in that run")
     skip_fresh_hours: float | None = Field(None, ge=0, description="skip products priced less than N hours ago")
     include_missing: bool = Field(False, description="also refresh products flagged missing")
-    update_details: bool = Field(False, description="also update description/characteristics/images")
+    update_details: bool = Field(
+        True,
+        description="also re-parse description/characteristics/images from the same product page (no extra "
+        "request); false = prices only",
+    )
     limit: int | None = Field(None, ge=1)
 
 
@@ -704,6 +708,24 @@ class MatchEventOut(BaseModel):
     data: dict[str, Any] = Field(description="snapshot of the previous state")
     created_at: datetime
     product_title: str | None = None
+
+
+class DimensionlessProductOut(BaseModel):
+    product_id: int
+    catalog_reference: str | None
+    title: str | None
+    category: str | None
+    url: str | None
+    product_type: str | None = Field(description="type read in the title, else the category name")
+    title_has_numbers: bool = Field(description="the title has numbers but no measure was read: likely a parsing gap")
+    normalized_attributes: dict[str, Any]
+
+
+class DimensionlessPage(Page[DimensionlessProductOut]):
+    by_product_type: dict[str, int] = Field(
+        description="all products without dimensions of the competitor (before filters), by product type "
+        '("unknown" = none detected)'
+    )
 
 
 class ProductAnalysisOut(BaseModel):

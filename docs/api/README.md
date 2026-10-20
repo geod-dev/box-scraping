@@ -81,7 +81,7 @@ one **task**:
 | task | what it does | allowed when |
 |---|---|---|
 | `catalog_sync` | crawls every category/listing page, then every product page: creates/updates categories and products (details, characteristics, images) and records current prices; at the end of a complete full sync, products no longer listed are flagged `missing` | no active job |
-| `price_refresh` | visits the known product pages and records their current prices only (fast; no category crawl) | no active job **and** a full catalog sync was done (`last_full_catalog_at` set) |
+| `price_refresh` | visits the known product pages, records their current prices and re-parses their details from the same page (no extra request; `update_details: false` = prices only). Fast: no category crawl | no active job **and** a full catalog sync was done (`last_full_catalog_at` set) |
 | `matching` | associates the competitor's products with Antalis products (see [Product matching](#product-matching)); no web page is fetched | not Antalis itself, no active job, a full catalog sync of the competitor **and** of Antalis, `VOYAGE_API_KEY` set on the server |
 
 Rules enforced by the server (also by the database):
@@ -474,7 +474,7 @@ flags anything missing.
 | `retry_failed_run_id` | only the products that failed in that run |
 | `skip_fresh_hours` | skip products priced less than N h ago |
 | `include_missing` | also refresh products flagged missing |
-| `update_details` | also update descriptions/characteristics/images |
+| `update_details` | default `true`: also re-parse descriptions/characteristics/images from the same page (no extra request); `false` = prices only |
 | `limit` | at most N products |
 
 `matching`: `mode` = `incremental` (default) | `deprecated` | `all` (see

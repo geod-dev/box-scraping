@@ -14,7 +14,7 @@ from competitor_catalog.core.normalize import fold
 
 # Bump when the scoring code changes in a way that changes results: the next incremental run
 # then recomputes every engine result (human decisions are kept).
-ENGINE_VERSION = "1"
+ENGINE_VERSION = "2"
 FEATURE_POLICIES = ("exclude", "review")
 
 
@@ -75,6 +75,10 @@ class MatchingConfig:
     compatible_types: frozenset[frozenset[str]]
     features: tuple[Feature, ...]
     require_comparable_dimensions: bool = True
+    # Descriptions in the compared texts (embedding and TF-IDF). Off by default: the sites write
+    # them too differently (Antalis: a spec line; Packdiscount: long SEO/FAQ prose), and they
+    # drown the title. Characteristics are still read in the description either way.
+    description_in_similarity: bool = False
     raw: dict[str, Any] = field(default_factory=dict, compare=False)
 
     def types_compatible(self, a: str | None, b: str | None) -> bool:
@@ -191,6 +195,7 @@ def parse_matching_config(data: dict[str, Any]) -> MatchingConfig:
         compatible_types=frozenset(compatible),
         features=tuple(features),
         require_comparable_dimensions=bool(data.get("require_comparable_dimensions", True)),
+        description_in_similarity=bool((data.get("text") or {}).get("description_in_similarity", False)),
         raw=data,
     )
     if not config.semantic_floor < config.semantic_ceiling or not config.lexical_floor < config.lexical_ceiling:

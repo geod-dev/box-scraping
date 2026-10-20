@@ -35,7 +35,8 @@ UNORDERED_PENALTY = 0.9
 
 _NUM = r"(\d+(?:[.,]\d+)?)"
 _UNIT = r"(mm|cm|m)"
-_X = r"\s*[x×*]\s*"
+# A label may name the next measure: "l.300mm X L.1000M", "300 x h:200 mm".
+_X = r"\s*[x×*]\s*(?:[a-z]{1,5}\s*[.:=]\s*)?"
 _TRIPLE = re.compile(rf"{_NUM}\s*{_UNIT}?{_X}{_NUM}\s*{_UNIT}?{_X}{_NUM}\s*{_UNIT}(?![a-z0-9])")
 _PAIR = re.compile(rf"{_NUM}\s*{_UNIT}?{_X}{_NUM}\s*{_UNIT}(?![a-z0-9])")
 _THICKNESS = re.compile(rf"{_NUM}\s*(?:[µμ]m?|um|microns?)(?![a-z0-9])")

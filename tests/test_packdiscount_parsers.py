@@ -142,6 +142,13 @@ def test_variant_dimensions_are_normalized_from_centimetres(adapter):
     assert "Longueur intérieure (cm)" in labels
 
 
+def test_film_roll_dimensions_use_the_real_units_not_the_site_labels(adapter):
+    # The site labels film_largeur "largeur cm" but the value is in mm (title: l.300mm).
+    url = f"{API}/products/FPR3019?{EXPAND}"
+    product = adapter.parse_product(page("product_variant_film_FPR3019.json", url))
+    assert product.normalized_attributes == {"width_mm": 300, "roll_length_m": 1000, "thickness_um": 19}
+
+
 def test_variant_price_is_per_unit_with_minimum_quantity(adapter):
     product = adapter.parse_product(page("product_variant_MCFA23.json", VARIANT))
     assert product.prices.price_found is True

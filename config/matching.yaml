@@ -21,6 +21,13 @@ embedding:
   requests_per_minute: 2000
   tokens_per_minute: 8000000
 
+text:
+  # Compared texts (embedding and TF-IDF) = title + category name. Descriptions are left out:
+  # Antalis writes a short spec line, Packdiscount long SEO/FAQ prose, and that prose drowned
+  # the title (identical titles scored 0.18 lexical / 0.855 semantic with it, 1.0 / 0.968
+  # without, 2026-10-20). Characteristics (color, flute...) are still read in descriptions.
+  description_in_similarity: false
+
 retrieval:
   # Candidates gathered by each signal before re-ranking (union, without duplicates).
   semantic_top_k: 25

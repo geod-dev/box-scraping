@@ -65,12 +65,15 @@ class TextOptions:
 
     ignore_description_patterns: tuple[re.Pattern[str], ...] = ()
     max_description_chars: int = 1500
+    description_in_similarity: bool = False  # matching.yaml text.description_in_similarity
 
     @classmethod
-    def from_options(cls, options: dict[str, Any] | None, max_description_chars: int = 1500) -> TextOptions:
+    def from_options(
+        cls, options: dict[str, Any] | None, max_description_chars: int = 1500, description_in_similarity: bool = False
+    ) -> TextOptions:
         options = options or {}
         patterns = tuple(re.compile(p, re.IGNORECASE) for p in options.get("ignore_description_patterns") or [])
-        return cls(patterns, max_description_chars)
+        return cls(patterns, max_description_chars, description_in_similarity)
 
 
 def effective_description(source: ProductSource, options: TextOptions) -> str | None:
@@ -94,11 +97,15 @@ def _category_line(source: ProductSource) -> str | None:
     return category
 
 
+def _similarity_description(source: ProductSource, options: TextOptions) -> str | None:
+    return effective_description(source, options) if options.description_in_similarity else None
+
+
 def embedding_text(source: ProductSource, options: TextOptions) -> str:
-    """Title + description (the requested signal), plus the category name, which carries the
-    product family when the description is empty (frequent for product variants)."""
+    """Title (+ description when enabled), plus the category name, which carries the product
+    family when the title is terse (frequent for product variants)."""
     lines = [clean_text(source.title) or ""]
-    description = effective_description(source, options)
+    description = _similarity_description(source, options)
     if description:
         lines.append(description)
     category = _category_line(source)
@@ -110,7 +117,7 @@ def embedding_text(source: ProductSource, options: TextOptions) -> str:
 def lexical_text(source: ProductSource, options: TextOptions) -> str:
     title = clean_text(source.title) or ""
     # The title is repeated: its words weigh twice those of the description.
-    parts = [title, title, effective_description(source, options) or "", _category_line(source) or ""]
+    parts = [title, title, _similarity_description(source, options) or "", _category_line(source) or ""]
     return "\n".join(parts)
 
 

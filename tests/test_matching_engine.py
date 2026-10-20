@@ -19,6 +19,7 @@ from competitor_catalog.matching.text import (
     TextOptions,
     effective_description,
     embedding_text,
+    lexical_text,
     product_hash,
     text_hash,
     tokens,
@@ -71,6 +72,20 @@ def test_boilerplate_description_falls_back_to_long_description_and_category():
     assert effective_description(s2, PACKDISCOUNT_TEXT) == "Carton brun très solide"
 
 
+def test_descriptions_stay_out_of_the_compared_texts_unless_enabled():
+    faq = "Peut-on y expédier des objets fragiles ? Oui, avec calage adapté. Empilable et recyclable."
+    s = source(1, "Caisse carton simple cannelure 45 x 32 x 17 cm", faq, category="Caisses")
+    assert embedding_text(s, TextOptions()) == "Caisse carton simple cannelure 45 x 32 x 17 cm\nCatégorie : Caisses"
+    assert "fragile" not in tokens(lexical_text(s, TextOptions()))
+    assert not CONFIG.description_in_similarity
+    with_description = TextOptions(description_in_similarity=True)
+    assert faq in embedding_text(s, with_description)
+    assert "fragile" in tokens(lexical_text(s, with_description))
+    # Characteristics are still read in the description.
+    doc = build_doc(source(2, "Caisse carton", "carton brun"), TextOptions(), CONFIG)
+    assert doc.features.values["color"] == frozenset({"brown"})
+
+
 def test_product_hash_covers_matching_fields_only():
     base = source(1, "Caisse", "desc", {"color": "Brun"}, "Caisses")
     assert product_hash(base) == product_hash(source(1, "Caisse", "desc", {"color": "Brun"}, "Caisses"))
@@ -100,6 +115,10 @@ def test_tokens_drop_numbers_stopwords_and_plurals():
         (
             "Papier étirable 500 mm x 120 m 48 g/m²",
             {"width_mm": (500.0,), "length_m": (120.0,), "grammage_g_m2": (48.0,)},
+        ),
+        (
+            "Film Retractable Polyolefine l.300mm X L.1000M 19µ",
+            {"width_mm": (300.0,), "length_m": (1000.0,), "thickness_um": (19.0,)},
         ),
         ("Enveloppe 229 x 324 mm", {"flat_mm": (229.0, 324.0)}),
         ("Sac poubelle 100 L", {"volume_l": (100.0,)}),

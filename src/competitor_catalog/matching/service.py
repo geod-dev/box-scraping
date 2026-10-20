@@ -44,8 +44,10 @@ from competitor_catalog.db.models import (
 )
 from competitor_catalog.db.session import transaction
 from competitor_catalog.matching.config import MatchingConfig
+from competitor_catalog.matching.dimensions import extract_profile
 from competitor_catalog.matching.embeddings import Embedder, EmbeddingCache, EmbeddingStats, load_cached
 from competitor_catalog.matching.engine import MatchEngine, MatchOutcome, ProductDoc, ReferenceIndex, build_doc
+from competitor_catalog.matching.features import detect_type
 from competitor_catalog.matching.text import ProductSource, TextOptions, product_hash
 from competitor_catalog.services.notifications import notify
 from competitor_catalog.services.runs import NULL_OBSERVER, RunObserver, utcnow
@@ -161,6 +163,28 @@ def load_sources(session: Session, *conditions: Any) -> list[ProductSource]:
     return [ProductSource(*row) for row in rows]
 
 
+@dataclass(frozen=True)
+class DimensionlessProduct:
+    source: ProductSource
+    product_type: str | None
+    title_has_numbers: bool  # numbers but no measure read: most likely a parsing gap
+
+
+def products_without_dimensions(
+    session: Session, competitor_id: int, config: MatchingConfig
+) -> list[DimensionlessProduct]:
+    """Readable products of a competitor whose title and normalized attributes give no
+    measure at all (the engine then cannot compare dimensions), to find parsing gaps."""
+    result = []
+    for source in load_sources(session, Product.id.in_(eligible_products(competitor_id))):
+        if extract_profile(source.title, source.normalized_attributes):
+            continue
+        product_type = detect_type(source.title, config) or detect_type(source.category, config)
+        has_numbers = any(c.isdigit() for c in source.title or "")
+        result.append(DimensionlessProduct(source, product_type, has_numbers))
+    return result
+
+
 def sources_by_id(session: Session, ids: Iterable[int]) -> dict[int, ProductSource]:
     ids = sorted(set(ids))
     result: dict[int, ProductSource] = {}
@@ -178,7 +202,9 @@ def catalog_hash(sources: Iterable[ProductSource]) -> str:
 
 
 def text_options(config: MatchingConfig, competitor_options: dict[str, Any] | None) -> TextOptions:
-    return TextOptions.from_options(competitor_options, config.embedding.max_description_chars)
+    return TextOptions.from_options(
+        competitor_options, config.embedding.max_description_chars, config.description_in_similarity
+    )
 
 
 # --------------------------------------------------------------------------- history

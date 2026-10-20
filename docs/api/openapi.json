@@ -4760,6 +4760,122 @@
         }
       }
     },
+    "/api/v1/matching/dimensionless": {
+      "get": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Products whose dimensions could not be read",
+        "description": "Readable products (active, parsed, with a title) for which neither the normalized\nattributes nor the title give any measure, the way the matching engine reads them: their\nmatching cannot compare dimensions. Use it to find attribute mappings and title formats\nto support. Sorted by product type, then title.",
+        "operationId": "dimensionless_api_v1_matching_dimensionless_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "competitor key (the reference catalog works too)",
+              "title": "Competitor"
+            },
+            "description": "competitor key (the reference catalog works too)"
+          },
+          {
+            "name": "product_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "detected product type (box, tape...), 'unknown' = none detected",
+              "title": "Product Type"
+            },
+            "description": "detected product type (box, tape...), 'unknown' = none detected"
+          },
+          {
+            "name": "title_has_numbers",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true = titles with numbers (likely parsing gaps)",
+              "title": "Title Has Numbers"
+            },
+            "description": "true = titles with numbers (likely parsing gaps)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "page size",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "page size"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "number of items to skip",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "number of items to skip"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DimensionlessPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/matching/products/{product_id}": {
       "get": {
         "tags": [
@@ -6946,6 +7062,132 @@
           "reference"
         ],
         "title": "DifferenceOut"
+      },
+      "DimensionlessPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DimensionlessProductOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          },
+          "by_product_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Product Type",
+            "description": "all products without dimensions of the competitor (before filters), by product type (\"unknown\" = none detected)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset",
+          "by_product_type"
+        ],
+        "title": "DimensionlessPage"
+      },
+      "DimensionlessProductOut": {
+        "properties": {
+          "product_id": {
+            "type": "integer",
+            "title": "Product Id"
+          },
+          "catalog_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Reference"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "product_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Type",
+            "description": "type read in the title, else the category name"
+          },
+          "title_has_numbers": {
+            "type": "boolean",
+            "title": "Title Has Numbers",
+            "description": "the title has numbers but no measure was read: likely a parsing gap"
+          },
+          "normalized_attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Normalized Attributes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "product_id",
+          "catalog_reference",
+          "title",
+          "category",
+          "url",
+          "product_type",
+          "title_has_numbers",
+          "normalized_attributes"
+        ],
+        "title": "DimensionlessProductOut"
       },
       "DimensionsOut": {
         "properties": {
@@ -9712,8 +9954,8 @@
           "update_details": {
             "type": "boolean",
             "title": "Update Details",
-            "description": "also update description/characteristics/images",
-            "default": false
+            "description": "also re-parse description/characteristics/images from the same product page (no extra request); false = prices only",
+            "default": true
           },
           "limit": {
             "anyOf": [

@@ -1,9 +1,11 @@
-"""Operation B: price-only refresh of already known products.
+"""Operation B: refresh of already known products from their detail pages.
 
 Visits the stored product detail URLs (no category crawl), extracts the current price
 tiers with the adapter's price parser and appends observations through the same
-persistence function as the catalog sync. Product descriptions, characteristics and
-images are left untouched unless ``update_details`` is explicitly requested.
+persistence function as the catalog sync. The page is the full product page, so its
+descriptions, characteristics and images are re-parsed too (``update_details``, on by
+default: no extra request). A details parse error only adds a warning: the prices are
+still recorded.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ class PriceRefreshOptions:
     retry_failed_run_id: int | None = None  # only products that failed in that run
     skip_fresh_hours: float | None = None  # skip products priced less than N hours ago
     include_missing: bool = False
-    update_details: bool = False
+    update_details: bool = True
     limit: int | None = None
 
 
@@ -172,10 +174,16 @@ class PriceRefresh:
 
         try:
             price_page = self.adapter.parse_prices(page)
-            details = self.adapter.parse_product(page) if options.update_details else None
         except PageError as exc:
             tracker.bump(pages_failed=1)
             return failed("failed", exc)
+        details = None
+        details_warning = None
+        if options.update_details:
+            try:
+                details = self.adapter.parse_product(page)
+            except PageError as exc:
+                details_warning = f"details not updated: {exc}"
 
         identity_changed = (
             price_page.catalog_reference != product.catalog_reference
@@ -194,6 +202,8 @@ class PriceRefresh:
 
         snapshot = price_page.prices
         warnings = list(snapshot.warnings)
+        if details_warning:
+            warnings.append(details_warning)
         with transaction(self.factory) as session:
             db_product = session.get(Product, product.id)
             if details is not None:

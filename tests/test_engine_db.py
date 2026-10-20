@@ -330,11 +330,11 @@ def test_resume_skips_recently_synced_products_but_counts_them_as_seen(toy):
 # --------------------------------------------------------------------------- price refresh
 
 
-def test_price_refresh_only_visits_product_urls_and_keeps_details(toy):
+def test_price_refresh_prices_only_visits_product_urls_and_keeps_details(toy):
     site = toy_site()
     toy.sync(site)
     _set(site, f"{BASE}/p/A1", title="SHOULD NOT BE STORED", tiers=[{"price": 9.5, "min": 1}])
-    result, fetcher = toy.refresh(site)
+    result, fetcher = toy.refresh(site, update_details=False)
     assert result.status == "succeeded"
     assert sorted(fetcher.requests) == sorted(f"{BASE}/p/{r}" for r in ["A1", "A2", "A3", "B1"])
     products = toy.products()
@@ -349,11 +349,11 @@ def test_price_refresh_only_visits_product_urls_and_keeps_details(toy):
         } == {run.id}
 
 
-def test_price_refresh_can_update_details_when_asked(toy):
+def test_price_refresh_updates_details_by_default(toy):
     site = toy_site()
     toy.sync(site)
     _set(site, f"{BASE}/p/A1", title="New title")
-    toy.refresh(site, references=["A1"], update_details=True)
+    toy.refresh(site, references=["A1"])
     assert toy.products()["A1"].title == "New title"
 
 

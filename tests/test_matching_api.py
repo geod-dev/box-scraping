@@ -220,3 +220,13 @@ def test_prerequisites_through_the_api(env):
         "/competitors/packdiscount_fr/worker/estimate", {"task": "matching", "options": {"mode": "all"}}
     )
     assert estimate["products"] == 4 and estimate["embeddings"] == 11
+
+
+def test_products_without_dimensions(env):
+    page = env.get("/matching/dimensionless", competitor="packdiscount_fr")
+    assert [i["catalog_reference"] for i in page["items"]] == ["P3"]  # "Socle banc L. 600 mm": no unit pair
+    item = page["items"][0]
+    assert item["product_type"] == "furniture" and item["title_has_numbers"] is True
+    assert page["by_product_type"] == {"furniture": 1}
+    assert env.get("/matching/dimensionless", competitor="packdiscount_fr", product_type="box")["total"] == 0
+    assert env.get("/matching/dimensionless", competitor="packdiscount_fr", title_has_numbers="false")["total"] == 0

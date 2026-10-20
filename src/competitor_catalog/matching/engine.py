@@ -295,8 +295,8 @@ class MatchEngine:
     # ------------------------------------------------------------------ decision
     def _decide(self, candidates: list[Candidate]) -> MatchOutcome:
         cfg = self.config
-        ranked = sorted((c for c in candidates if not c.excluded), key=lambda c: (-c.score, c.product_id))
-        excluded = sorted((c for c in candidates if c.excluded), key=lambda c: (-c.score, c.product_id))
+        ranked = sorted((c for c in candidates if not c.excluded), key=_rank_key)
+        excluded = sorted((c for c in candidates if c.excluded), key=_rank_key)
         for rank, candidate in enumerate(ranked, 1):
             candidate.rank = rank
         stored = ranked[: cfg.stored_candidates] + excluded[: cfg.stored_excluded]
@@ -347,3 +347,11 @@ def _reason(code: str, message: str) -> dict[str, str]:
 
 def _round(value: float | None, digits: int = 4) -> float | None:
     return round(value, digits) if value is not None else None
+
+
+def _rank_key(c: Candidate) -> tuple:
+    """Score first. Ties (sub-scores saturated at their ceiling, e.g. two titles that only
+    differ by a color) go to the candidate without review flags, then to the closest raw
+    cosines, so a "blanc" tape does not rank the brown one first by product id."""
+    semantic = c.details["semantic"]["cosine"]
+    return (-c.score, len(c.review_flags), -(semantic or 0.0), -c.details["lexical"]["cosine"], c.product_id)

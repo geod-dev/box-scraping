@@ -70,7 +70,13 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--retry-failed", type=int, metavar="RUN_ID", help="only products that failed in that run")
     s.add_argument("--skip-fresh-hours", type=float, help="skip products priced less than N hours ago")
     s.add_argument("--include-missing", action="store_true", help="also refresh products flagged missing")
-    s.add_argument("--update-details", action="store_true", help="also update description/characteristics/images")
+    s.add_argument(
+        "--update-details",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="also re-parse description/characteristics/images from the same page (default; "
+        "--no-update-details = prices only)",
+    )
     s.add_argument("--limit", type=int)
     s.add_argument("--request-interval", type=float, help="override the configured delay between requests (s)")
     s.set_defaults(func=cmd_price_refresh)

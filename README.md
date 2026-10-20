@@ -128,12 +128,15 @@ uv run catalog-scraper price-refresh --competitor antalis_fr --category HQ02947 
 uv run catalog-scraper price-refresh --competitor antalis_fr --product 503623 --product 586283
 uv run catalog-scraper price-refresh --competitor antalis_fr --retry-failed 12       # only failures of run #12
 uv run catalog-scraper price-refresh --competitor antalis_fr --skip-fresh-hours 24   # resume after a crash
-uv run catalog-scraper price-refresh --competitor antalis_fr --update-details        # also refresh descriptions...
+uv run catalog-scraper price-refresh --competitor antalis_fr --no-update-details     # prices only
 ```
 
 * Loads products from the database (never crawls categories), fetches their stored detail
-  URL, parses prices only and appends observations linked to the run.
-* Descriptions / characteristics / images are untouched unless `--update-details`.
+  URL, records the prices and appends observations linked to the run.
+* The fetched page is the full product page: descriptions / characteristics / images are
+  re-parsed from it too (no extra request), unless `--no-update-details`. Use it to apply an
+  adapter or attribute mapping change without a full catalog sync. A details parse error
+  only adds a warning; the prices are still recorded.
 * If the page now shows another reference (redirect) — or, for URL-identity products,
   another canonical URL — the item fails and no price is stored.
 * `--retry-failed RUN_ID` accepts a price-refresh or a catalog run (failed items are matched
@@ -457,14 +460,19 @@ products needing a human review.
 
 **Engine** (`matching/engine.py`, pure; `text.py`, `dimensions.py`, `features.py`, `lexical.py`):
 
-1. *What is read*: the title + the description (embedded together as asked) + the category
-   name (which carries the product family when the description is empty, as for
-   Packdiscount variants whose placeholder description "➤ Voir toutes les références" is
-   ignored through `matching.ignore_description_patterns` of the competitor YAML; the long
-   description is used instead when present), and the normalized attributes.
+1. *What is read*: the title + the category name (which carries the product family when the
+   title is terse) are the compared texts (embedding and TF-IDF); the description is read
+   for characteristics only (color, flute wall...), and the normalized attributes for
+   dimensions. Descriptions are kept out of the compared texts
+   (`text.description_in_similarity: false` in `config/matching.yaml`): Antalis writes a short
+   spec line, Packdiscount long SEO/FAQ prose that drowned the title (identical titles scored
+   0.18 lexical / 0.855 semantic with it, 1.0 / 0.968 without). Packdiscount placeholder
+   descriptions ("➤ Voir toutes les références") are ignored through
+   `matching.ignore_description_patterns` of the competitor YAML (the long description is
+   used instead when present).
 2. *Signals*: **semantic** = cosine of `voyage-4` embeddings (1024 dims, rescaled from
-   `[0.55, 0.95]` to 0..1: unrelated packaging products are ~0.5, two descriptions of the
-   same product ~0.92-0.97); **lexical** = TF-IDF cosine of the words (numbers excluded,
+   `[0.55, 0.95]` to 0..1: different product families are ~0.5-0.7, the same family with
+   another construction ~0.87, the same product ~0.96); **lexical** = TF-IDF cosine of the words (numbers excluded,
    IDF learnt on the Antalis catalog, rescaled with ceiling 0.6); **dimensions** = measures
    with an explicit unit, from the normalized attributes first, else the title
    (`L x l x h` box, roll width x length, flat format, thickness µm, grammage, volume):

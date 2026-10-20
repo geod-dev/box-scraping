@@ -6,6 +6,7 @@ competitor product. Runs are worker jobs (task ``matching``), followed like any 
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -668,6 +669,52 @@ def history(
 
 
 # --------------------------------------------------------------------------- one product
+
+
+@router.get(
+    "/dimensionless",
+    response_model=schemas.DimensionlessPage,
+    summary="Products whose dimensions could not be read",
+)
+def dimensionless(
+    session: SessionDep,
+    page: PageDep,
+    matching: MatchingDep,
+    competitor: Annotated[str, Query(description="competitor key (the reference catalog works too)")],
+    product_type: Annotated[
+        str | None, Query(description="detected product type (box, tape...), 'unknown' = none detected")
+    ] = None,
+    title_has_numbers: Annotated[
+        bool | None, Query(description="true = titles with numbers (likely parsing gaps)")
+    ] = None,
+):
+    """Readable products (active, parsed, with a title) for which neither the normalized
+    attributes nor the title give any measure, the way the matching engine reads them: their
+    matching cannot compare dimensions. Use it to find attribute mappings and title formats
+    to support. Sorted by product type, then title."""
+    found = service.products_without_dimensions(session, competitor_or_404(session, competitor).id, matching.config)
+    by_type = Counter(p.product_type or "unknown" for p in found)
+    if product_type is not None:
+        found = [p for p in found if (p.product_type or "unknown") == product_type]
+    if title_has_numbers is not None:
+        found = [p for p in found if p.title_has_numbers == title_has_numbers]
+    found.sort(key=lambda p: (p.product_type or "~", p.source.title or ""))
+    items = [
+        schemas.DimensionlessProductOut(
+            product_id=p.source.product_id,
+            catalog_reference=p.source.reference,
+            title=p.source.title,
+            category=p.source.category,
+            url=p.source.url,
+            product_type=p.product_type,
+            title_has_numbers=p.title_has_numbers,
+            normalized_attributes=p.source.normalized_attributes or {},
+        )
+        for p in found[page.offset : page.offset + page.limit]
+    ]
+    return schemas.DimensionlessPage(
+        items=items, total=len(found), limit=page.limit, offset=page.offset, by_product_type=dict(by_type)
+    )
 
 
 @router.get(

@@ -47,12 +47,26 @@ options:
     caisse_quantite_palette: "Quantité sur palette"
     caisse_qualite: "Qualité"
     caisse_colis_de: "Colis de"
+    # Rolls. The site labels film_largeur "largeur cm", but the values are millimetres
+    # ("l.300mm X L.1000M 19µ" -> 300.0); the units below were checked against the titles of
+    # the whole catalog (2026-10-20). Exception: 6 "Plaque de Polystyrène" variants put
+    # centimetres / metres in film_largeur / film_longueur.
+    film_largeur: "Largeur film (mm)"
+    film_longueur: "Longueur film (m)"
+    film_epaisseur: "Épaisseur film (µm)"
+    adhesif_largeur_mm: "Largeur adhésif (mm)"
+    adhesif_longueur_m: "Longueur adhésif (m)"
+    adhesif_epaisseur: "Épaisseur adhésif (µm)"
+    sacherie_epaisseur: "Épaisseur sachet (µm)"
   # Canonical normalized attribute -> labels that carry it (case and accent insensitive).
   # Keys ending in _mm are converted from cm when the label carries the unit.
   attribute_mapping:
     inner_length_mm: ["Longueur intérieure (cm)"]
     inner_width_mm: ["Largeur intérieure (cm)"]
     inner_height_mm: ["Hauteur intérieure (cm)"]
+    width_mm: ["Largeur film (mm)", "Largeur adhésif (mm)"]
+    roll_length_m: ["Longueur film (m)", "Longueur adhésif (m)"]
+    thickness_um: ["Épaisseur film (µm)", "Épaisseur adhésif (µm)", "Épaisseur sachet (µm)"]
     max_height_mm: ["Hauteur maximale (cm)"]
     pallet_quantity: ["Quantité sur palette"]
     quality_code: ["Qualité"]
