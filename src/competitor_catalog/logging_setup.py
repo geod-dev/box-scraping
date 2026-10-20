@@ -11,8 +11,9 @@ import re
 import sys
 
 _SECRETS: set[str] = set()
-# Defence in depth: also mask any ``token=...`` query parameter, whatever its value.
-_TOKEN_PARAM = re.compile(r"(?i)(token=)[^&\s'\"]+")
+# Defence in depth: also mask any ``token=...`` / ``api_key=...`` query parameter (the MCP
+# endpoint takes the API key in the URL, uvicorn logs it), whatever its value.
+_TOKEN_PARAM = re.compile(r"(?i)((?:token|api_key)=)[^&\s'\"]+")
 
 
 def register_secret(value: str | None) -> None:

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from competitor_catalog import __version__
+from competitor_catalog.api import mcp
 from competitor_catalog.api.deps import ApiError, error_body
 from competitor_catalog.api.routes import (
     categories,
@@ -30,6 +31,7 @@ from competitor_catalog.app import build_matching_runtime, session_factory
 from competitor_catalog.core.config import load_competitor_configs
 from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.session import transaction
+from competitor_catalog.logging_setup import register_secret
 from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.settings import Settings, SettingsError
 
@@ -42,6 +44,7 @@ refresh / product matching), scraped categories, products and price history, run
 matching of competitor products with the reference catalog (Antalis), notifications.
 
 Authentication: send the API key in the `X-API-Key` header (or `Authorization: Bearer`).
+MCP server (every endpoint as a tool): `POST /api/v1/mcp?api_key=<key>` (Streamable HTTP).
 Errors: `{"error": {"code", "message", "details"}}`. Full guide: `docs/api/` in the repository.
 """
 
@@ -65,6 +68,7 @@ def create_app(
         raise SettingsError("API_KEY is not set (or set API_AUTH_DISABLED=true for local development only)")
     if auth_disabled:
         log.warning("API authentication is DISABLED")
+    register_secret(api_key)  # the MCP endpoint receives it in the URL (access logs)
 
     app = FastAPI(
         title="Competitor catalog API",
@@ -116,4 +120,5 @@ def create_app(
     routers = (system, competitors, jobs, categories, products, observations, runs, matching_routes, notifications)
     for module in routers:
         app.include_router(module.router, prefix=API_PREFIX)
+    app.include_router(mcp.router, prefix=API_PREFIX)  # last: its tools are the routes above
     return app

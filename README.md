@@ -15,7 +15,8 @@ Two independent operations:
 On the server they run as **worker jobs** driven by an **HTTP API** (`catalog-scraper api`
 + `catalog-scraper worker`): start/pause/resume/stop a job per competitor, live progress
 and ETA, CRUD on the scraped data, persisted notifications. Nothing scrapes unless a job
-is requested. API guide for client/frontend developers: [`docs/api/`](docs/api/README.md).
+is requested. API guide for client/frontend developers: [`docs/api/`](docs/api/README.md). The API is also
+an MCP server (`/api/v1/mcp?api_key=<key>`) exposing every endpoint as a tool.
 
 A third job, **product matching** (§5), associates every product of the other competitors
 with the corresponding **Antalis** product (the reference catalog): Voyage AI embeddings +

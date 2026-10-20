@@ -47,10 +47,13 @@ def require_api_key(
     api_key: Annotated[str | None, Depends(_api_key_header)],
     bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> None:
+    check_api_key(request, api_key or (bearer.credentials if bearer else None))
+
+
+def check_api_key(request: Request, provided: str | None) -> None:
     expected: str | None = request.app.state.api_key
     if expected is None:  # API_AUTH_DISABLED=true (local development only)
         return
-    provided = api_key or (bearer.credentials if bearer else None)
     if not provided or not secrets.compare_digest(provided.encode(), expected.encode()):
         raise ApiError(401, "unauthorized", "missing or invalid API key (X-API-Key header)")
 

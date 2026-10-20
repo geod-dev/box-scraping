@@ -395,12 +395,33 @@ the associated Antalis product changes: it then becomes `deprecated` (former ass
 kept, `matches_deprecated` notification). Obsolescence is detected after every catalog sync
 / price refresh, at the start of every matching run and after a product edit through the API.
 
+## MCP server (AI agents)
+
+`POST /api/v1/mcp?api_key=<key>` is an [MCP](https://modelcontextprotocol.io) server
+(Streamable HTTP transport, stateless, JSON responses) whose tools are **every endpoint of
+this API**: an agent (Claude Code, Claude Desktop, ...) can list and call them directly.
+
+* Add it to a client with the URL only, e.g.
+  `claude mcp add --transport http catalog "https://<host>/api/v1/mcp?api_key=<key>"`.
+  The `X-API-Key` header works too, for clients that can send headers.
+* Tools are generated from `openapi.json` at startup: one tool per endpoint, named after the
+  route function (`list_products`, `start_worker`, `validate`...). The description starts
+  with the method and path (`POST /api/v1/competitors/{key}/worker/start: ...`); path and query
+  parameters are top-level arguments, the JSON body goes in `body`. GET tools are annotated
+  read-only, DELETE tools destructive.
+* A call is replayed in-process against the API itself with the same key: same validation,
+  same errors. The result is the endpoint's JSON response, or `HTTP <status>: <error body>`
+  with `isError: true`.
+* A new endpoint becomes a tool with nothing to add on the MCP side.
+* The key in the URL is masked (`api_key=***`) in the server logs.
+
 ## Endpoint index
 
 All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 
 | Method | Path | Purpose |
 |---|---|---|
+| POST | `/mcp?api_key=<key>` | MCP server: every endpoint below as a tool (not in `openapi.json`) |
 | GET | `/health` | API, database and worker liveness (no auth) |
 | GET | `/stats` | global counters |
 | GET | `/scrapedo/account` | Scrape.do plan and remaining credits (max 10 calls/min) |

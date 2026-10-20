@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Competitor catalog API",
-    "description": "\nCompetitor catalog scraper API: competitors and their worker (catalog sync / price\nrefresh / product matching), scraped categories, products and price history, runs,\nmatching of competitor products with the reference catalog (Antalis), notifications.\n\nAuthentication: send the API key in the `X-API-Key` header (or `Authorization: Bearer`).\nErrors: `{\"error\": {\"code\", \"message\", \"details\"}}`. Full guide: `docs/api/` in the repository.\n",
+    "description": "\nCompetitor catalog scraper API: competitors and their worker (catalog sync / price\nrefresh / product matching), scraped categories, products and price history, runs,\nmatching of competitor products with the reference catalog (Antalis), notifications.\n\nAuthentication: send the API key in the `X-API-Key` header (or `Authorization: Bearer`).\nMCP server (every endpoint as a tool): `POST /api/v1/mcp?api_key=<key>` (Streamable HTTP).\nErrors: `{\"error\": {\"code\", \"message\", \"details\"}}`. Full guide: `docs/api/` in the repository.\n",
     "version": "0.1.0"
   },
   "paths": {
