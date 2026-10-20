@@ -126,7 +126,7 @@ def test_small_family(adapter):
 def test_sku_503623_full_parse(adapter):
     product = adapter.parse_product(page("sku_503623.html"))
     assert product.url == SKU_503623
-    assert product.catalog_reference == product.external_id == product.antalis_reference == "503623"
+    assert product.catalog_reference == product.external_id == "503623"
     assert product.title == "Caisse carton à fond automatique et hauteur variable simple cannelure 305 x 215 x 170 mm"
     assert product.description.startswith("Caisse carton à fond automatique et hauteur variable simple cannelure, RA4")
     assert "rainurage tous les centimètres" in product.long_description

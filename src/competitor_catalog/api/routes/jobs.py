@@ -10,6 +10,8 @@ from sqlalchemy import select
 from competitor_catalog.api import schemas, views
 from competitor_catalog.api.deps import (
     ApiError,
+    ConfigsDep,
+    MatchingDep,
     PageDep,
     SessionDep,
     competitor_id_filter,
@@ -17,7 +19,7 @@ from competitor_catalog.api.deps import (
     require_api_key,
 )
 from competitor_catalog.api.routes.competitors import refusal
-from competitor_catalog.db.models import JOB_ACTIVE_STATUSES, WorkerJob
+from competitor_catalog.db.models import JOB_ACTIVE_STATUSES, Competitor, WorkerJob
 from competitor_catalog.services import jobs as job_service
 
 router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(require_api_key)])
@@ -110,6 +112,33 @@ def resume_job(job_id: int, session: SessionDep):
         raise refusal(exc) from None
     session.commit()
     return views.jobs_out(session, [job])[0]
+
+
+@router.post(
+    "/{job_id}/restart",
+    response_model=schemas.JobOut,
+    status_code=202,
+    summary="Restart an interrupted, failed or cancelled job where it stopped",
+    responses={409: {"model": schemas.ErrorResponse}},
+)
+def restart_job(job_id: int, session: SessionDep, configs: ConfigsDep, matching: MatchingDep):
+    """Queues a new job of the same task (``resumed_from_job_id`` = this job) that skips the
+    work already done: a catalog sync replays the category pages already fetched (no request)
+    and does not refetch the products synced since the stopped job started, a price refresh
+    skips the products priced since then, a matching is incremental anyway. Jobs interrupted by a worker restart
+    are restarted automatically (``requested_by: "auto_resume"``) unless the server sets
+    ``WORKER_AUTO_RESUME=false``."""
+    job = _job(session, job_id)
+    competitor = session.get(Competitor, job.competitor_id)
+    config = configs.get(competitor.key)
+    if config is None:
+        raise ApiError(409, "competitor_not_configured", f"no configuration file for {competitor.key}")
+    try:
+        new = job_service.restart_job(session, job, config, requested_by="api", matching=matching)
+    except job_service.JobRequestError as exc:
+        raise refusal(exc) from None
+    session.commit()
+    return views.job_out(new, competitor.key)
 
 
 @router.delete(

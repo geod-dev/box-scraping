@@ -27,6 +27,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -44,8 +45,14 @@ ITEM_TYPES = ("listing_page", "product")
 ITEM_STATUSES = ("succeeded", "failed", "not_found", "no_price", "skipped")
 PRICE_BASES = ("unit", "total", "unknown")
 TAX_MODES = ("excl_tax", "incl_tax", "unknown")
-MATCH_STATUSES = ("proposed", "validated", "rejected")
-JOB_TASKS = ("catalog_sync", "price_refresh")
+# auto_matched / validated: associated with antalis_product_id (by the engine / by a human);
+# needs_review: proposal waiting for a human; no_match: no acceptable candidate (engine);
+# rejected: a human confirmed there is no equivalent; deprecated: the data changed since.
+MATCH_STATUSES = ("auto_matched", "needs_review", "no_match", "validated", "rejected", "deprecated")
+MATCH_HUMAN_STATUSES = ("validated", "rejected")
+MATCH_ENGINE_STATUSES = ("auto_matched", "needs_review", "no_match")
+MATCH_EVENTS = ("computed", "recomputed", "validated", "rejected", "deprecated", "reset")
+JOB_TASKS = ("catalog_sync", "price_refresh", "matching")
 JOB_STATUSES = ("queued", "running", "paused", "succeeded", "partial", "failed", "cancelled", "interrupted")
 JOB_ACTIVE_STATUSES = ("queued", "running", "paused")
 NOTIFICATION_LEVELS = ("info", "success", "warning", "error")
@@ -163,8 +170,12 @@ class Product(TimestampMixin, Base):
         Text, comment="ref:<catalog_reference>, or url:<canonical url> when the site exposes no stable reference"
     )
     catalog_reference: Mapped[str | None] = mapped_column(Text)
+    # DEPRECATED, never read nor written: kept until a later migration drops it, so that the
+    # previous release (still running during a deploy) can write it. Do not use.
     antalis_reference: Mapped[str | None] = mapped_column(
-        Text, comment="Corresponding Antalis reference (own reference for Antalis, cross-reference for others)"
+        Text,
+        deferred=True,
+        comment="Corresponding Antalis reference (own reference for Antalis, cross-reference for others)",
     )
     external_id: Mapped[str | None] = mapped_column(Text)
     url: Mapped[str] = mapped_column(Text)  # exact product detail URL (canonical)
@@ -249,6 +260,22 @@ class ScrapeRunItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ListingPageCache(Base):
+    """Listing pages fetched by the catalog sync, kept until a sync completes: a resumed sync
+    replays them instead of fetching (and paying for) the category pages again."""
+
+    __tablename__ = "listing_page_cache"
+    __table_comment__ = "Listing pages of unfinished catalog syncs, replayed (no request) when a sync resumes"
+
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"), primary_key=True)
+    url: Mapped[str] = mapped_column(Text, primary_key=True, comment="requested URL")
+    final_url: Mapped[str] = mapped_column(Text)
+    status_code: Mapped[int] = mapped_column(Integer)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scrape_run_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_runs.id", ondelete="SET NULL"))
+    body: Mapped[bytes] = mapped_column(LargeBinary, comment="zlib-compressed UTF-8 page text")
+
+
 class ScrapeObservation(Base):
     """One observed price for one product and one quantity tier at one moment (append-only)."""
 
@@ -293,29 +320,146 @@ class ScrapeObservation(Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, server_default=text("'{}'::jsonb"))
 
 
+class ProductEmbedding(Base):
+    """Cached embedding of a product's matching text, reused while ``text_hash`` is unchanged."""
+
+    __tablename__ = "product_embeddings"
+    __table_comment__ = "Embedding of each product's matching text (title + description), reused while unchanged"
+
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), primary_key=True)
+    model: Mapped[str] = mapped_column(Text)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    text_hash: Mapped[str] = mapped_column(Text, comment="sha256 of model, dimensions, input type and text")
+    tokens: Mapped[int | None] = mapped_column(Integer, comment="tokens billed for this text (null = shared/unknown)")
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, comment="float32 little-endian, L2-normalized")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ProductMatch(TimestampMixin, Base):
-    """Proposed/validated equivalence between two competitor products (never a merge)."""
+    """Current matching state of one competitor product against the reference catalog.
+
+    Exactly one row per competitor product (reruns update it, never duplicate it). Every
+    change is also appended to ``product_match_events``, so nothing is lost when a match is
+    recomputed, decided by a human or deprecated.
+    """
 
     __tablename__ = "product_matches"
-    __table_comment__ = "Proposed/validated equivalences between products of different competitors"
+    __table_comment__ = "Current association of each competitor product with a reference (Antalis) product"
     __table_args__ = (
-        UniqueConstraint("product_a_id", "product_b_id", name="uq_product_matches_pair"),
-        CheckConstraint("product_a_id < product_b_id", name="ck_product_matches_ordered_pair"),
-        CheckConstraint("confidence IS NULL OR (confidence >= 0 AND confidence <= 1)", name="ck_product_matches_conf"),
+        UniqueConstraint("product_id", name="uq_product_matches_product"),
         CheckConstraint(_in("status", MATCH_STATUSES), name="ck_product_matches_status"),
-        Index("ix_product_matches_b", "product_b_id"),
+        CheckConstraint(_in("previous_status", MATCH_STATUSES), name="ck_product_matches_previous_status"),
+        CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="ck_product_matches_score"),
+        CheckConstraint(
+            "antalis_product_id IS NULL OR antalis_product_id <> product_id", name="ck_product_matches_not_self"
+        ),
+        Index("ix_product_matches_competitor_status", "competitor_id", "status"),
+        Index("ix_product_matches_status_score", "status", "score"),
+        Index("ix_product_matches_antalis_product", "antalis_product_id"),
+        Index("ix_product_matches_proposed_product", "proposed_antalis_product_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    product_a_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
-    product_b_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
-    match_type: Mapped[str] = mapped_column(Text, server_default=text("'equivalent'"))
-    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
-    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
-    method: Mapped[str | None] = mapped_column(Text)  # manual, antalis_reference, attribute_rule...
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    validated_by: Mapped[str | None] = mapped_column(Text)
-    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(Text)
+    antalis_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"),
+        comment="The associated reference product (auto_matched, validated); null otherwise",
+    )
+    proposed_antalis_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), comment="Best candidate found by the engine"
+    )
+    score: Mapped[Decimal | None] = mapped_column(
+        Numeric(5, 2), comment="Similarity score 0-100 of the proposed candidate (not a probability)"
+    )
+    runner_up_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    score_gap: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    dimensions_compared: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    decision_reasons: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    # change detection
+    product_hash: Mapped[str | None] = mapped_column(Text, comment="Hash of the competitor product's matching fields")
+    antalis_product_hash: Mapped[str | None] = mapped_column(
+        Text, comment="Hash of the associated (else proposed) reference product's matching fields"
+    )
+    reference_catalog_hash: Mapped[str | None] = mapped_column(Text, comment="Reference catalog state when computed")
+    config_hash: Mapped[str | None] = mapped_column(Text, comment="Matching configuration when computed")
+    computed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("worker_jobs.id", ondelete="SET NULL"))
+    # human decision
+    decided_by: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_comment: Mapped[str | None] = mapped_column(Text)
+    manual_choice: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), comment="validated with a product other than the engine's proposal"
+    )
+    rejected_antalis_product_ids: Mapped[list[Any]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb"), comment="Reference products a human rejected for this product"
+    )
+    # obsolescence
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deprecated_reason: Mapped[str | None] = mapped_column(Text)
+    previous_status: Mapped[str | None] = mapped_column(Text, comment="Status before deprecation")
+    revision: Mapped[int] = mapped_column(Integer, server_default=text("0"), comment="Optimistic lock")
+
+    product: Mapped[Product] = relationship(foreign_keys=[product_id])
+    antalis_product: Mapped[Product | None] = relationship(foreign_keys=[antalis_product_id])
+    proposed_antalis_product: Mapped[Product | None] = relationship(foreign_keys=[proposed_antalis_product_id])
+
+
+class ProductMatchCandidate(Base):
+    """A reference product considered for a match, with its score breakdown (latest computation)."""
+
+    __tablename__ = "product_match_candidates"
+    __table_comment__ = "Ranked candidates of the latest computation of each match, with per-criterion scores"
+    __table_args__ = (
+        UniqueConstraint("match_id", "antalis_product_id", name="uq_product_match_candidates_pair"),
+        Index("ix_product_match_candidates_antalis_product", "antalis_product_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("product_matches.id", ondelete="CASCADE"))
+    antalis_product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
+    rank: Mapped[int | None] = mapped_column(Integer, comment="1 = best; null for excluded candidates")
+    score: Mapped[Decimal] = mapped_column(Numeric(5, 2))
+    semantic_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    lexical_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    dimension_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), comment="null = not comparable")
+    excluded: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+
+
+class ProductMatchEvent(Base):
+    """Append-only history of every match (computations, human decisions, deprecations)."""
+
+    __tablename__ = "product_match_events"
+    __table_comment__ = "Append-only history of product matches: computations, decisions, deprecations"
+    __table_args__ = (
+        CheckConstraint(_in("event", MATCH_EVENTS), name="ck_product_match_events_event"),
+        Index("ix_product_match_events_match", "match_id", "created_at"),
+        Index("ix_product_match_events_competitor", "competitor_id", "created_at"),
+        Index("ix_product_match_events_event", "event", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("product_matches.id", ondelete="CASCADE"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    event: Mapped[str] = mapped_column(Text)
+    from_status: Mapped[str | None] = mapped_column(Text)
+    to_status: Mapped[str | None] = mapped_column(Text)
+    # plain ids (no foreign key): the history survives the deletion of a reference product
+    from_antalis_product_id: Mapped[int | None] = mapped_column(BigInteger)
+    to_antalis_product_id: Mapped[int | None] = mapped_column(BigInteger)
+    score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    actor: Mapped[str] = mapped_column(Text, comment="'engine' or the name of the person who decided")
+    reason: Mapped[str | None] = mapped_column(Text)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("worker_jobs.id", ondelete="SET NULL"))
+    data: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb"), comment="Snapshot of the previous state (scores, top candidates)"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class WorkerJob(Base):
@@ -352,6 +496,10 @@ class WorkerJob(Base):
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # when the worker paused
     claimed_by: Mapped[str | None] = mapped_column(Text)  # worker process instance id
     scrape_run_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_runs.id", ondelete="SET NULL"))
+    resumed_from_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("worker_jobs.id", ondelete="SET NULL", name="fk_worker_jobs_resumed_from"),
+        comment="The interrupted/stopped job this one restarts (manual or automatic resume)",
+    )
     step: Mapped[str | None] = mapped_column(Text)
     step_done: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     step_goal: Mapped[int | None] = mapped_column(Integer)

@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import re
 import uuid
+import zlib
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, and_, func, or_, select, text, update
+from sqlalchemy import Select, and_, delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from competitor_catalog.core.config import CompetitorConfig
@@ -21,11 +23,13 @@ from competitor_catalog.core.urls import last_path_segment
 from competitor_catalog.db.models import (
     Category,
     Competitor,
+    ListingPageCache,
     Product,
     ScrapeObservation,
     ScrapeRun,
     ScrapeRunItem,
 )
+from competitor_catalog.http.base import FetchedPage
 
 # --------------------------------------------------------------------------- competitors
 
@@ -203,7 +207,6 @@ def upsert_product(
 
     product.url = data.url
     _set_if_known(product, "catalog_reference", data.catalog_reference)
-    _set_if_known(product, "antalis_reference", data.antalis_reference)
     _set_if_known(product, "external_id", data.external_id)
     _set_if_known(product, "title", data.title)
     _set_if_known(product, "description", data.description)
@@ -401,6 +404,75 @@ def failed_product_ids(session: Session, competitor_id: int, run_id: int) -> lis
             session.scalars(select(Product.id).where(Product.competitor_id == competitor_id, Product.url.in_(urls)))
         )
     return sorted(ids)
+
+
+# --------------------------------------------------------------------------- listing page cache
+
+
+def cached_listing_urls(session: Session, competitor_id: int, since: datetime) -> set[str]:
+    return set(
+        session.scalars(
+            select(ListingPageCache.url).where(
+                ListingPageCache.competitor_id == competitor_id, ListingPageCache.fetched_at >= since
+            )
+        )
+    )
+
+
+def load_listing_page(session: Session, competitor_id: int, url: str) -> ListingPageCache | None:
+    return session.get(ListingPageCache, (competitor_id, url))
+
+
+def store_listing_page(session: Session, competitor_id: int, run_id: int | None, page: FetchedPage) -> None:
+    values = {
+        "competitor_id": competitor_id,
+        "url": page.requested_url,
+        "final_url": page.final_url,
+        "status_code": page.status_code,
+        "fetched_at": page.fetched_at,
+        "scrape_run_id": run_id,
+        "body": zlib.compress(page.text.encode("utf-8"), 6),
+    }
+    stmt = pg_insert(ListingPageCache).values(values)
+    session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["competitor_id", "url"],
+            set_={k: stmt.excluded[k] for k in ("final_url", "status_code", "fetched_at", "scrape_run_id", "body")},
+        )
+    )
+
+
+def purge_listing_cache(session: Session, competitor_id: int, older_than: datetime | None = None) -> int:
+    stmt = delete(ListingPageCache).where(ListingPageCache.competitor_id == competitor_id)
+    if older_than is not None:
+        stmt = stmt.where(ListingPageCache.fetched_at < older_than)
+    return session.execute(stmt).rowcount or 0
+
+
+def failed_catalog_urls(session: Session, competitor_id: int, run_id: int) -> tuple[list[str], list[str]]:
+    """(listing page URLs, product URLs) that failed in a catalog run of this competitor."""
+    run = session.get(ScrapeRun, run_id)
+    if run is None or run.competitor_id != competitor_id or run.operation != "catalog_discovery":
+        raise ValueError(f"run #{run_id} is not a catalog run of this competitor")
+    rows = session.execute(
+        select(ScrapeRunItem.item_type, ScrapeRunItem.url)
+        .where(ScrapeRunItem.scrape_run_id == run_id, ScrapeRunItem.status == "failed")
+        .order_by(ScrapeRunItem.id)
+    ).all()
+    listings = list(dict.fromkeys(url for kind, url in rows if kind == "listing_page"))
+    products = list(dict.fromkeys(url for kind, url in rows if kind == "product"))
+    return listings, products
+
+
+def count_failed_items(session: Session, run_id: int) -> dict[str, int]:
+    """item_type -> number of failed items of a run."""
+    return dict(
+        session.execute(
+            select(ScrapeRunItem.item_type, func.count())
+            .where(ScrapeRunItem.scrape_run_id == run_id, ScrapeRunItem.status == "failed")
+            .group_by(ScrapeRunItem.item_type)
+        ).all()
+    )
 
 
 def recent_runs(session: Session, competitor_id: int | None = None, limit: int = 20) -> Iterable[ScrapeRun]:

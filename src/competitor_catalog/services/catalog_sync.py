@@ -8,11 +8,22 @@
    are appended through the shared price persistence used by the price refresh.
 3. Only a *complete* run over the *full configured scope* may flag categories/products it
    did not see as ``missing``; a partial/failed run never does.
+
+Every listing page fetched is also kept (compressed) in ``listing_page_cache`` until a full
+sync completes. A sync started with ``resume_within_hours`` (the default of the API and of
+restarted/auto-resumed jobs) replays the cached pages fetched within that window instead of
+requesting them again: resuming an interrupted sync costs no listing request, and its
+crawl, completeness checks and missing-flagging work exactly as for a fresh crawl.
+
+``retry_failed_run_id`` replaces the full crawl by the pages that failed in a previous run:
+its failed product pages, and its failed listing pages (crawled again with their subtree,
+whose products were never discovered). Such a run is never full scope.
 """
 
 from __future__ import annotations
 
 import logging
+import zlib
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -32,6 +43,8 @@ from competitor_catalog.services.runs import RunObserver, RunStopped, RunTracker
 
 log = logging.getLogger(__name__)
 
+LISTING_CACHE_MAX_AGE = timedelta(days=7)  # older cached pages are purged at the next sync
+
 
 @dataclass
 class CatalogSyncOptions:
@@ -45,6 +58,8 @@ class CatalogSyncOptions:
     # an interrupted previous run) are not fetched again, only confirmed as seen.
     resume_within_hours: float | None = None
     allow_mass_missing: bool = False
+    # Only the pages that failed in that run of the same competitor (no full crawl).
+    retry_failed_run_id: int | None = None
 
     @property
     def is_full_scope(self) -> bool:
@@ -53,6 +68,7 @@ class CatalogSyncOptions:
             and self.max_listing_pages is None
             and self.max_products is None
             and not self.skip_products
+            and self.retry_failed_run_id is None
         )
 
 
@@ -80,19 +96,32 @@ class CatalogSync:
         self.factory = factory
         self.competitor_id = competitor_id
         self.observer = observer or RunObserver()
+        self._replayable: set[str] = set()
 
     def run(self, options: CatalogSyncOptions | None = None) -> CatalogSyncResult:
         options = options or CatalogSyncOptions()
-        roots = [self.adapter.normalize_url(u) for u in (options.root_urls or self.adapter.config.root_urls)]
+        retry_products: list[str] = []
+        if options.retry_failed_run_id is not None:
+            with transaction(self.factory) as session:
+                roots, retry_products = repo.failed_catalog_urls(
+                    session, self.competitor_id, options.retry_failed_run_id
+                )
+        else:
+            roots = [self.adapter.normalize_url(u) for u in (options.root_urls or self.adapter.config.root_urls)]
         tracker = RunTracker(self.factory, self.competitor_id, "catalog_discovery", self.observer)
         params: dict[str, Any] = {
             "root_urls": roots,
             "max_listing_pages": options.max_listing_pages,
             "max_products": options.max_products,
             "skip_products": options.skip_products,
+            "retry_failed_run_id": options.retry_failed_run_id,
         }
         run_id = tracker.start(params, full_scope=options.is_full_scope)
-        state = _CrawlState(roots=roots)
+        self._prepare_replay(options)
+        # Retried listing pages are not crawl roots: one failing again is a failed page, not a fatal error.
+        state = _CrawlState(roots=roots, critical_roots=options.retry_failed_run_id is None)
+        for url in retry_products:
+            state.add_product(ProductLink(url=url))
         status, error = "failed", None
         try:
             self._crawl_listings(tracker, state, options)
@@ -110,6 +139,9 @@ class CatalogSync:
             if complete and options.is_full_scope:
                 self._mark_missing(tracker, run_id, options, state)
             status = "succeeded" if complete else "partial"
+            if options.is_full_scope:  # the whole tree was crawled: nothing left to resume
+                with transaction(self.factory) as session:
+                    repo.purge_listing_cache(session, self.competitor_id)
         except FatalFetchError as exc:
             error = f"fatal fetch error: {exc}"
             log.error(error)
@@ -150,13 +182,14 @@ class CatalogSync:
             url = queue.popleft()
             pages += 1
             is_root = url in state.roots
+            critical = is_root and state.critical_roots
             try:
-                self._process_listing(tracker, state, url, is_root, queue, queued)
+                self._process_listing(tracker, state, url, is_root, queue, queued, critical=critical)
             except FatalFetchError:
                 raise
             except Exception as exc:  # one broken page must not kill a multi-hour crawl
                 log.exception("unexpected error on listing page %s", url)
-                self._page_failed(tracker, state, url, exc, critical=is_root)
+                self._page_failed(tracker, state, url, exc, critical=critical)
             tracker.flush(_credits(self.fetcher))
             self.observer.progress("crawl_listings", pages, None, pending=len(queue))
         self.observer.progress("crawl_listings", pages, pages)
@@ -176,8 +209,10 @@ class CatalogSync:
         is_root: bool,
         queue: deque[str],
         queued: set[str],
+        *,
+        critical: bool,
     ) -> None:
-        page = self._fetch(tracker, url, "listing_page", state, critical=is_root)
+        page = self._fetch(tracker, url, "listing_page", state, critical=critical)
         if page is None:
             return
         try:
@@ -189,7 +224,7 @@ class CatalogSync:
                 return
             listing = self.adapter.parse_listing(page)
         except PageError as exc:
-            self._page_failed(tracker, state, url, exc, critical=is_root)
+            self._page_failed(tracker, state, url, exc, critical=critical)
             return
 
         category = listing.category
@@ -359,8 +394,8 @@ class CatalogSync:
                 )
 
     def _recently_synced(self, options: CatalogSyncOptions) -> dict[str, int]:
-        if not options.resume_within_hours:
-            return {}
+        if not options.resume_within_hours or options.retry_failed_run_id is not None:
+            return {}  # a retry refetches the failed pages whatever their last sync
         cutoff = utcnow() - timedelta(hours=options.resume_within_hours)
         with transaction(self.factory) as session:
             rows = session.execute(
@@ -399,13 +434,53 @@ class CatalogSync:
         tracker.bump(products_seen=1)
         tracker.stats["products_resumed"] = tracker.stats.get("products_resumed", 0) + 1
 
+    # ------------------------------------------------------------------ listing page cache
+    def _prepare_replay(self, options: CatalogSyncOptions) -> None:
+        with transaction(self.factory) as session:
+            repo.purge_listing_cache(session, self.competitor_id, older_than=utcnow() - LISTING_CACHE_MAX_AGE)
+            if options.resume_within_hours and options.retry_failed_run_id is None:
+                since = utcnow() - timedelta(hours=options.resume_within_hours)
+                self._replayable = repo.cached_listing_urls(session, self.competitor_id, since)
+        if self._replayable:
+            log.info("resume: %d listing page(s) replayed from the cache", len(self._replayable))
+
+    def _replay(self, tracker: RunTracker, url: str) -> FetchedPage | None:
+        self._replayable.discard(url)
+        with transaction(self.factory) as session:
+            cached = repo.load_listing_page(session, self.competitor_id, url)
+            if cached is None:
+                return None
+            page = FetchedPage(
+                url,
+                cached.final_url,
+                cached.status_code,
+                zlib.decompress(cached.body).decode("utf-8"),
+                cached.fetched_at,
+                {"replayed_from_cache": True},
+            )
+        tracker.stats["listing_pages_replayed"] = tracker.stats.get("listing_pages_replayed", 0) + 1
+        return page
+
+    def _cache(self, tracker: RunTracker, page: FetchedPage) -> None:
+        try:
+            with transaction(self.factory) as session:
+                repo.store_listing_page(session, self.competitor_id, tracker.run_id, page)
+        except Exception:  # the cache only saves requests on a resume: never fail the crawl for it
+            log.exception("could not cache listing page %s", page.requested_url)
+
     # ------------------------------------------------------------------ helpers
     def _fetch(
         self, tracker: RunTracker, url: str, item_type: str, state: _CrawlState, *, critical: bool = False
     ) -> FetchedPage | None:
+        if item_type == "listing_page" and url in self._replayable:
+            page = self._replay(tracker, url)
+            if page is not None:
+                return page
         try:
             page = self.fetcher.fetch(url)
             tracker.bump(pages_fetched=1)
+            if item_type == "listing_page":
+                self._cache(tracker, page)
             return page
         except FatalFetchError:
             raise
@@ -462,8 +537,9 @@ class CatalogSync:
 
 
 class _CrawlState:
-    def __init__(self, roots: list[str]):
+    def __init__(self, roots: list[str], *, critical_roots: bool = True):
         self.roots = set(roots)
+        self.critical_roots = critical_roots  # a failing root aborts the run
         self.root_canonicals: set[str] = set(roots)
         self.category_urls: list[str] = []
         self.product_links: dict[str, ProductLink] = {}

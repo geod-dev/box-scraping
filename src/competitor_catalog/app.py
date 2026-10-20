@@ -12,6 +12,9 @@ from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.session import make_engine, make_session_factory, transaction
 from competitor_catalog.http.ratelimit import MinIntervalRateLimiter
 from competitor_catalog.http.scrapedo import ScrapeDoClient, ScrapeDoOptions
+from competitor_catalog.matching.config import load_matching_config
+from competitor_catalog.matching.embeddings import VoyageEmbedder
+from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.settings import Settings
 
 
@@ -32,6 +35,14 @@ def build_fetcher(settings: Settings, config: CompetitorConfig, *, interval: flo
         max_attempts=config.max_attempts,
         archive_dir=settings.html_archive_dir,
     )
+
+
+def build_matching_runtime(settings: Settings) -> MatchingRuntime:
+    """Matching config; embeddings only when VOYAGE_API_KEY is set (else matching is disabled)."""
+    config = load_matching_config(settings.matching_config_path)
+    api_key = settings.voyage_api_key
+    factory = (lambda: VoyageEmbedder(api_key, config.embedding)) if api_key else None
+    return MatchingRuntime(config, factory)
 
 
 def session_factory(settings: Settings) -> sessionmaker[Session]:

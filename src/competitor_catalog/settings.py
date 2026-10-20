@@ -1,6 +1,6 @@
 """Process-level settings read from the environment (optionally from a local .env file).
 
-Secrets (the Scrape.do API key) are only ever read from the environment and are never
+Secrets (the Scrape.do and Voyage AI API keys) are only ever read from the environment and are never
 logged: see :mod:`competitor_catalog.logging_setup` for the redaction filter.
 """
 
@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_COMPETITOR_CONFIG_DIR = PROJECT_ROOT / "config" / "competitors"
+DEFAULT_MATCHING_CONFIG = PROJECT_ROOT / "config" / "matching.yaml"
 
 
 class SettingsError(RuntimeError):
@@ -27,6 +28,8 @@ class Settings:
     competitor_config_dir: Path
     log_level: str
     html_archive_dir: Path | None
+    voyage_api_key: str | None = None  # product matching embeddings (Voyage AI)
+    matching_config_path: Path = DEFAULT_MATCHING_CONFIG
 
     def require_database_url(self) -> str:
         if not self.database_url:
@@ -49,4 +52,6 @@ def load_settings(env_file: str | os.PathLike[str] | None = None) -> Settings:
         competitor_config_dir=Path(os.environ.get("COMPETITOR_CONFIG_DIR") or DEFAULT_COMPETITOR_CONFIG_DIR),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         html_archive_dir=Path(archive) if archive else None,
+        voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
+        matching_config_path=Path(os.environ.get("MATCHING_CONFIG") or DEFAULT_MATCHING_CONFIG),
     )

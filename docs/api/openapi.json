@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Competitor catalog API",
-    "description": "\nCompetitor catalog scraper API: competitors and their worker (catalog sync / price\nrefresh), scraped categories, products and price history, runs, notifications.\n\nAuthentication: send the API key in the `X-API-Key` header (or `Authorization: Bearer`).\nErrors: `{\"error\": {\"code\", \"message\", \"details\"}}`. Full guide: `docs/api/` in the repository.\n",
+    "description": "\nCompetitor catalog scraper API: competitors and their worker (catalog sync / price\nrefresh / product matching), scraped categories, products and price history, runs,\nmatching of competitor products with the reference catalog (Antalis), notifications.\n\nAuthentication: send the API key in the `X-API-Key` header (or `Authorization: Bearer`).\nErrors: `{\"error\": {\"code\", \"message\", \"details\"}}`. Full guide: `docs/api/` in the repository.\n",
     "version": "0.1.0"
   },
   "paths": {
@@ -229,8 +229,8 @@
         "tags": [
           "competitors & workers"
         ],
-        "summary": "Start the worker on a task (catalog_sync or price_refresh)",
-        "description": "Queues a job; the worker process picks it up within a few seconds.\n\nRefusals (HTTP 409): ``worker_busy`` (the competitor already has a queued/running job,\nwhatever its task), ``catalog_required`` (price refresh before any full catalog sync),\n``competitor_disabled``.",
+        "summary": "Start the worker on a task (catalog_sync, price_refresh or matching)",
+        "description": "Queues a job; the worker process picks it up within a few seconds.\n\nRefusals (HTTP 409): ``worker_busy`` (the competitor already has a queued/running job,\nwhatever its task), ``catalog_required`` (price refresh or matching before any full\ncatalog sync), ``competitor_disabled``; matching only: ``matching_reference`` (the\nreference catalog itself), ``reference_catalog_required``, ``reference_missing``,\n``matching_not_configured`` (no VOYAGE_API_KEY).",
         "operationId": "start_worker_api_v1_competitors__key__worker_start_post",
         "security": [
           {
@@ -262,6 +262,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/PriceRefreshJobIn"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MatchingJobIn"
                   }
                 ],
                 "examples": [
@@ -270,6 +273,12 @@
                   },
                   {
                     "task": "price_refresh"
+                  },
+                  {
+                    "task": "matching",
+                    "options": {
+                      "mode": "incremental"
+                    }
                   }
                 ],
                 "title": "Body"
@@ -531,6 +540,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/PriceRefreshJobIn"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MatchingJobIn"
                   }
                 ],
                 "examples": [
@@ -539,6 +551,12 @@
                   },
                   {
                     "task": "price_refresh"
+                  },
+                  {
+                    "task": "matching",
+                    "options": {
+                      "mode": "incremental"
+                    }
                   }
                 ],
                 "title": "Body"
@@ -613,7 +631,8 @@
                 {
                   "enum": [
                     "catalog_sync",
-                    "price_refresh"
+                    "price_refresh",
+                    "matching"
                   ],
                   "type": "string"
                 },
@@ -953,6 +972,67 @@
         ],
         "summary": "Resume a paused job",
         "operationId": "resume_job_api_v1_jobs__job_id__resume_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}/restart": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Restart an interrupted, failed or cancelled job where it stopped",
+        "description": "Queues a new job of the same task (``resumed_from_job_id`` = this job) that skips the\nwork already done: a catalog sync replays the category pages already fetched (no request)\nand does not refetch the products synced since the stopped job started, a price refresh\nskips the products priced since then, a matching is incremental anyway. Jobs interrupted by a worker restart\nare restarted automatically (``requested_by: \"auto_resume\"``) unless the server sets\n``WORKER_AUTO_RESUME=false``.",
+        "operationId": "restart_job_api_v1_jobs__job_id__restart_post",
         "security": [
           {
             "APIKeyHeader": []
@@ -1577,10 +1657,10 @@
                   "type": "null"
                 }
               ],
-              "description": "catalog or Antalis reference, repeatable",
+              "description": "catalog reference, repeatable",
               "title": "Reference"
             },
-            "description": "catalog or Antalis reference, repeatable"
+            "description": "catalog reference, repeatable"
           },
           {
             "name": "has_price",
@@ -2093,7 +2173,7 @@
           "products"
         ],
         "summary": "Delete a product and its price history",
-        "description": "Deletes its price observations and matches too. A later catalog sync recreates the\nproduct if it is still listed on the site.",
+        "description": "Deletes its price observations and its own match too; the matches associated with it\n(a reference product) become deprecated. A later catalog sync recreates the product if\nit is still listed on the site.",
         "operationId": "delete_product_api_v1_products__product_id__delete",
         "security": [
           {
@@ -2933,6 +3013,67 @@
         }
       }
     },
+    "/api/v1/runs/{run_id}/retry-failed": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Retry only the pages that failed in a run",
+        "description": "Queues a job on the run's competitor that refetches only the failed pages of the run:\na ``catalog_sync`` with ``retry_failed_run_id`` for a catalog run (failed product pages,\nincluding products never created, and failed listing pages with their sub-pages), a\n``price_refresh`` with ``retry_failed_run_id`` for a price refresh run. ``409\nnothing_to_retry`` when the run has no failed page; ``worker_busy`` as usual.",
+        "operationId": "retry_failed_api_v1_runs__run_id__retry_failed_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runs/{run_id}/items": {
       "get": {
         "tags": [
@@ -3222,13 +3363,44 @@
         }
       }
     },
-    "/api/v1/product-matches": {
+    "/api/v1/matching/config": {
       "get": {
         "tags": [
-          "product matches"
+          "matching"
         ],
-        "summary": "List matches",
-        "operationId": "list_matches_api_v1_product_matches_get",
+        "summary": "Matching configuration (thresholds...)",
+        "description": "Thresholds and weights are edited in ``config/matching.yaml`` (redeploy); a change makes\nthe next incremental run recompute the engine results, human decisions are kept.",
+        "operationId": "get_config_api_v1_matching_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchingConfigOut"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/matching/summary": {
+      "get": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Matching state per competitor",
+        "description": "Counts per status, products never matched, items to review, deprecated matches,\nwhether a run can start (prerequisites: full catalog sync of the competitor and of the\nreference catalog, VOYAGE_API_KEY), the active/last matching job. The reference\ncompetitor is not listed.",
+        "operationId": "get_summary_api_v1_matching_summary_get",
         "security": [
           {
             "APIKeyHeader": []
@@ -3238,6 +3410,1227 @@
           }
         ],
         "parameters": [
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor key; default: every competitor",
+              "title": "Competitor"
+            },
+            "description": "competitor key; default: every competitor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MatchingSummaryOut"
+                  },
+                  "title": "Response Get Summary Api V1 Matching Summary Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/matching/competitors/{key}/run": {
+      "post": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Match the products of a competitor",
+        "description": "Queues a matching job (followed like any job: ``GET /jobs/{id}``, worker endpoints,\nnotifications). Default mode ``incremental``: what changed since the last run only.\n\nRefusals (HTTP 409): ``matching_reference``, ``catalog_required`` (no full catalog sync of\nthe competitor yet: its products are not parsed), ``reference_catalog_required``,\n``reference_missing``, ``matching_not_configured``, ``worker_busy``, ``competitor_disabled``.\nAt the end, a ``matching_summary`` notification gives the number of products to review.",
+        "operationId": "run_matching_api_v1_matching_competitors__key__run_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchingOptionsIn",
+                "examples": [
+                  {
+                    "mode": "incremental"
+                  },
+                  {
+                    "mode": "deprecated"
+                  },
+                  {
+                    "mode": "all"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        }
+      }
+    },
+    "/api/v1/matching/deprecated/rerun": {
+      "post": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Recompute every deprecated match",
+        "description": "Queues one ``mode=deprecated`` matching job per competitor that has deprecated matches\n(nothing else is recomputed). Competitors whose worker is busy are reported in ``refused``.",
+        "operationId": "rerun_deprecated_api_v1_matching_deprecated_rerun_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunIn",
+                "examples": [
+                  {},
+                  {
+                    "competitor": "packdiscount_fr"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerunOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/matching/matches": {
+      "get": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "List matches",
+        "description": "Every match with its status: ``auto_matched`` (automatic association), ``validated``\n(by a human, ``manual_choice`` when another product was chosen), ``needs_review``,\n``no_match``, ``rejected`` (a human confirmed there is no equivalent), ``deprecated``.",
+        "operationId": "list_matches_api_v1_matching_matches_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "auto_matched",
+                      "needs_review",
+                      "no_match",
+                      "validated",
+                      "rejected",
+                      "deprecated"
+                    ],
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "repeatable",
+              "title": "Status"
+            },
+            "description": "repeatable"
+          },
+          {
+            "name": "deprecated_reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "product_changed",
+                      "antalis_product_changed",
+                      "antalis_product_missing",
+                      "antalis_product_deleted",
+                      "reset_requested"
+                    ],
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "repeatable",
+              "title": "Deprecated Reason"
+            },
+            "description": "repeatable"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "score",
+                "score_gap",
+                "updated_at",
+                "computed_at",
+                "decided_at",
+                "deprecated_at",
+                "title",
+                "id"
+              ],
+              "type": "string",
+              "default": "updated_at",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "default": "desc",
+              "title": "Order"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "page size",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "page size"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "number of items to skip",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "number of items to skip"
+          },
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor key",
+              "title": "Competitor"
+            },
+            "description": "competitor key"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "words in the competitor product title/reference/brand",
+              "title": "Q"
+            },
+            "description": "words in the competitor product title/reference/brand"
+          },
+          {
+            "name": "antalis_q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "words in the associated or proposed Antalis product title/reference",
+              "title": "Antalis Q"
+            },
+            "description": "words in the associated or proposed Antalis product title/reference"
+          },
+          {
+            "name": "antalis_product_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "matches associated with / proposing this Antalis product",
+              "title": "Antalis Product Id"
+            },
+            "description": "matches associated with / proposing this Antalis product"
+          },
+          {
+            "name": "min_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Score"
+            }
+          },
+          {
+            "name": "max_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Score"
+            }
+          },
+          {
+            "name": "decided",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true = decided by a human",
+              "title": "Decided"
+            },
+            "description": "true = decided by a human"
+          },
+          {
+            "name": "manual_choice",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "validated with another product",
+              "title": "Manual Choice"
+            },
+            "description": "validated with another product"
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "decision reason code, repeatable (e.g. ambiguous_gap, feature_conflict)",
+              "title": "Reason"
+            },
+            "description": "decision reason code, repeatable (e.g. ambiguous_gap, feature_conflict)"
+          },
+          {
+            "name": "dimensions_compared",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dimensions Compared"
+            }
+          },
+          {
+            "name": "product_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "active",
+                    "missing"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor product",
+              "title": "Product Status"
+            },
+            "description": "competitor product"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MatchListItem_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/matching/review": {
+      "get": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Products that need a human review",
+        "description": "Matches in ``needs_review``: best candidate between the review and auto thresholds, or\nabove the auto threshold but ambiguous (second candidate too close) or with a conflicting\ncharacteristic. Decide with ``POST /matching/products/{product_id}/validate|reject``.",
+        "operationId": "review_queue_api_v1_matching_review_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "score",
+                "score_gap",
+                "updated_at",
+                "computed_at",
+                "decided_at",
+                "deprecated_at",
+                "title",
+                "id"
+              ],
+              "type": "string",
+              "default": "score",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "default": "desc",
+              "title": "Order"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "page size",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "page size"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "number of items to skip",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "number of items to skip"
+          },
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor key",
+              "title": "Competitor"
+            },
+            "description": "competitor key"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "words in the competitor product title/reference/brand",
+              "title": "Q"
+            },
+            "description": "words in the competitor product title/reference/brand"
+          },
+          {
+            "name": "antalis_q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "words in the associated or proposed Antalis product title/reference",
+              "title": "Antalis Q"
+            },
+            "description": "words in the associated or proposed Antalis product title/reference"
+          },
+          {
+            "name": "antalis_product_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "matches associated with / proposing this Antalis product",
+              "title": "Antalis Product Id"
+            },
+            "description": "matches associated with / proposing this Antalis product"
+          },
+          {
+            "name": "min_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Score"
+            }
+          },
+          {
+            "name": "max_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Score"
+            }
+          },
+          {
+            "name": "decided",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true = decided by a human",
+              "title": "Decided"
+            },
+            "description": "true = decided by a human"
+          },
+          {
+            "name": "manual_choice",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "validated with another product",
+              "title": "Manual Choice"
+            },
+            "description": "validated with another product"
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "decision reason code, repeatable (e.g. ambiguous_gap, feature_conflict)",
+              "title": "Reason"
+            },
+            "description": "decision reason code, repeatable (e.g. ambiguous_gap, feature_conflict)"
+          },
+          {
+            "name": "dimensions_compared",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dimensions Compared"
+            }
+          },
+          {
+            "name": "product_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "active",
+                    "missing"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor product",
+              "title": "Product Status"
+            },
+            "description": "competitor product"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MatchListItem_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/matching/deprecated": {
+      "get": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Obsolete matches",
+        "description": "Matches whose competitor or Antalis product changed (or disappeared) since they were\ncomputed or decided: ``previous_status`` and the association are kept as they were. They\nare recomputed by ``POST /matching/deprecated/rerun`` (or any incremental run); their\nformer state stays in the history (``GET /matching/history?event=deprecated``).",
+        "operationId": "deprecated_matches_api_v1_matching_deprecated_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "deprecated_reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "product_changed",
+                      "antalis_product_changed",
+                      "antalis_product_missing",
+                      "antalis_product_deleted",
+                      "reset_requested"
+                    ],
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "repeatable",
+              "title": "Deprecated Reason"
+            },
+            "description": "repeatable"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "score",
+                "score_gap",
+                "updated_at",
+                "computed_at",
+                "decided_at",
+                "deprecated_at",
+                "title",
+                "id"
+              ],
+              "type": "string",
+              "default": "deprecated_at",
+              "title": "Sort"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "default": "desc",
+              "title": "Order"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "page size",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "page size"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "number of items to skip",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "number of items to skip"
+          },
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor key",
+              "title": "Competitor"
+            },
+            "description": "competitor key"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "words in the competitor product title/reference/brand",
+              "title": "Q"
+            },
+            "description": "words in the competitor product title/reference/brand"
+          },
+          {
+            "name": "antalis_q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "words in the associated or proposed Antalis product title/reference",
+              "title": "Antalis Q"
+            },
+            "description": "words in the associated or proposed Antalis product title/reference"
+          },
+          {
+            "name": "antalis_product_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "matches associated with / proposing this Antalis product",
+              "title": "Antalis Product Id"
+            },
+            "description": "matches associated with / proposing this Antalis product"
+          },
+          {
+            "name": "min_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Score"
+            }
+          },
+          {
+            "name": "max_score",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "maximum": 100,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Score"
+            }
+          },
+          {
+            "name": "decided",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "true = decided by a human",
+              "title": "Decided"
+            },
+            "description": "true = decided by a human"
+          },
+          {
+            "name": "manual_choice",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "validated with another product",
+              "title": "Manual Choice"
+            },
+            "description": "validated with another product"
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "decision reason code, repeatable (e.g. ambiguous_gap, feature_conflict)",
+              "title": "Reason"
+            },
+            "description": "decision reason code, repeatable (e.g. ambiguous_gap, feature_conflict)"
+          },
+          {
+            "name": "dimensions_compared",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dimensions Compared"
+            }
+          },
+          {
+            "name": "product_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "active",
+                    "missing"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor product",
+              "title": "Product Status"
+            },
+            "description": "competitor product"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MatchListItem_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/matching/history": {
+      "get": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "History of all matches",
+        "description": "Every computation that changed a result, every human decision and every deprecation,\nnewest first, with a snapshot of the previous state in ``data``.",
+        "operationId": "history_api_v1_matching_history_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor key",
+              "title": "Competitor"
+            },
+            "description": "competitor key"
+          },
           {
             "name": "product_id",
             "in": "query",
@@ -3255,24 +4648,64 @@
             }
           },
           {
-            "name": "status",
+            "name": "event",
             "in": "query",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "enum": [
-                    "proposed",
-                    "validated",
-                    "rejected"
-                  ],
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "computed",
+                      "recomputed",
+                      "validated",
+                      "rejected",
+                      "deprecated",
+                      "reset"
+                    ],
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "repeatable",
+              "title": "Event"
+            },
+            "description": "repeatable"
+          },
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
                   "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "Status"
+              "title": "Actor"
             }
           },
           {
@@ -3309,55 +4742,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_MatchOut_"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "product matches"
-        ],
-        "summary": "Create a match",
-        "description": "The pair is stored ordered (``product_a_id < product_b_id``) whatever the order given.",
-        "operationId": "create_match_api_v1_product_matches_post",
-        "security": [
-          {
-            "APIKeyHeader": []
-          },
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MatchCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MatchOut"
+                  "$ref": "#/components/schemas/Page_MatchEventOut_"
                 }
               }
             }
@@ -3375,13 +4760,14 @@
         }
       }
     },
-    "/api/v1/product-matches/{match_id}": {
+    "/api/v1/matching/products/{product_id}": {
       "get": {
         "tags": [
-          "product matches"
+          "matching"
         ],
-        "summary": "One match",
-        "operationId": "get_match_api_v1_product_matches__match_id__get",
+        "summary": "A competitor product, its candidates and the score breakdown",
+        "description": "For review: what the engine read of the product (``analysis``), each candidate with its\nsub-scores (semantic, lexical, dimensions), weights, compared measures and\ncharacteristics, differences, exclusions and review flags, the final score, the decision\nreasons and the full history.",
+        "operationId": "get_product_match_api_v1_matching_products__product_id__get",
         "security": [
           {
             "APIKeyHeader": []
@@ -3392,12 +4778,12 @@
         ],
         "parameters": [
           {
-            "name": "match_id",
+            "name": "product_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Match Id"
+              "title": "Product Id"
             }
           }
         ],
@@ -3407,7 +4793,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MatchOut"
+                  "$ref": "#/components/schemas/MatchDetailOut"
                 }
               }
             }
@@ -3423,13 +4809,16 @@
             }
           }
         }
-      },
-      "patch": {
+      }
+    },
+    "/api/v1/matching/products/{product_id}/compare/{antalis_product_id}": {
+      "get": {
         "tags": [
-          "product matches"
+          "matching"
         ],
-        "summary": "Update a match (e.g. validate it)",
-        "operationId": "update_match_api_v1_product_matches__match_id__patch",
+        "summary": "Score breakdown against any Antalis product",
+        "description": "To check a manual choice before validating it. Uses the cached embeddings only (no\nVoyage call): ``semantic_available=false`` when one is missing.",
+        "operationId": "compare_api_v1_matching_products__product_id__compare__antalis_product_id__get",
         "security": [
           {
             "APIKeyHeader": []
@@ -3440,21 +4829,87 @@
         ],
         "parameters": [
           {
-            "name": "match_id",
+            "name": "product_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Match Id"
+              "title": "Product Id"
+            }
+          },
+          {
+            "name": "antalis_product_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Antalis Product Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompareOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/matching/products/{product_id}/validate": {
+      "post": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Validate the proposal or associate another Antalis product",
+        "description": "Without ``antalis_product_id``: confirms the engine's proposal. With it: associates that\nAntalis product (``manual_choice=true`` when it is not the proposal). Status ``validated``;\nkept by every rerun until the competitor or the Antalis product changes.",
+        "operationId": "validate_api_v1_matching_products__product_id__validate_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "product_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Product Id"
             }
           }
         ],
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MatchUpdate"
+                "$ref": "#/components/schemas/ValidateIn",
+                "examples": [
+                  {},
+                  {
+                    "antalis_product_id": 123,
+                    "decided_by": "alice"
+                  }
+                ]
               }
             }
           }
@@ -3465,29 +4920,42 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MatchOut"
+                  "$ref": "#/components/schemas/MatchDetailOut"
                 }
               }
             }
           },
-          "422": {
-            "description": "Validation Error",
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
-            }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           }
         }
-      },
-      "delete": {
+      }
+    },
+    "/api/v1/matching/products/{product_id}/reject": {
+      "post": {
         "tags": [
-          "product matches"
+          "matching"
         ],
-        "summary": "Delete a match",
-        "operationId": "delete_match_api_v1_product_matches__match_id__delete",
+        "summary": "Reject: no equivalent in the Antalis catalog",
+        "description": "Status ``rejected``; the rejected proposal is remembered and never proposed again for\nthis product. To associate another product instead, use ``validate`` with its id.",
+        "operationId": "reject_api_v1_matching_products__product_id__reject_post",
         "security": [
           {
             "APIKeyHeader": []
@@ -3498,18 +4966,127 @@
         ],
         "parameters": [
           {
-            "name": "match_id",
+            "name": "product_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "integer",
-              "title": "Match Id"
+              "title": "Product Id"
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejectIn",
+                "examples": [
+                  {},
+                  {
+                    "decided_by": "alice",
+                    "comment": "other size"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchDetailOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        }
+      }
+    },
+    "/api/v1/matching/products/{product_id}/reset": {
+      "post": {
+        "tags": [
+          "matching"
+        ],
+        "summary": "Send a match back to the engine",
+        "description": "The match becomes ``deprecated`` (reason ``reset_requested``, previous state kept in the\nhistory) and is recomputed by the next run (``mode=deprecated`` or ``incremental``).",
+        "operationId": "reset_api_v1_matching_products__product_id__reset_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "product_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Product Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetIn",
+                "examples": [
+                  {},
+                  {
+                    "clear_rejections": true
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchDetailOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "description": "Validation Error",
@@ -4059,6 +5636,158 @@
   },
   "components": {
     "schemas": {
+      "CandidateOut": {
+        "properties": {
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank",
+            "description": "1 = best; null for an excluded candidate"
+          },
+          "excluded": {
+            "type": "boolean",
+            "title": "Excluded"
+          },
+          "antalis_product": {
+            "$ref": "#/components/schemas/ProductBriefOut"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score",
+            "description": "similarity score on a 0-100 scale (NOT a probability of equivalence)"
+          },
+          "semantic_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Score"
+          },
+          "lexical_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lexical Score"
+          },
+          "dimension_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dimension Score",
+            "description": "null = dimensions not comparable"
+          },
+          "is_proposed": {
+            "type": "boolean",
+            "title": "Is Proposed"
+          },
+          "is_associated": {
+            "type": "boolean",
+            "title": "Is Associated"
+          },
+          "rejected_by_human": {
+            "type": "boolean",
+            "title": "Rejected By Human"
+          },
+          "weights": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Weights",
+            "description": "weights applied to the sub-scores"
+          },
+          "semantic": {
+            "$ref": "#/components/schemas/SignalOut"
+          },
+          "lexical": {
+            "$ref": "#/components/schemas/LexicalOut"
+          },
+          "dimensions": {
+            "$ref": "#/components/schemas/DimensionsOut"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/FeatureOut"
+            },
+            "type": "array",
+            "title": "Features"
+          },
+          "differences": {
+            "items": {
+              "$ref": "#/components/schemas/DifferenceOut"
+            },
+            "type": "array",
+            "title": "Differences"
+          },
+          "exclusions": {
+            "items": {
+              "$ref": "#/components/schemas/FlagOut"
+            },
+            "type": "array",
+            "title": "Exclusions",
+            "description": "certain incompatibilities: the candidate cannot be associated"
+          },
+          "review_flags": {
+            "items": {
+              "$ref": "#/components/schemas/FlagOut"
+            },
+            "type": "array",
+            "title": "Review Flags",
+            "description": "conflicts that forbid an automatic association"
+          },
+          "retrieved_by": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Retrieved By",
+            "description": "retrieval signals that found it: semantic, lexical, dimensions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "excluded",
+          "antalis_product",
+          "score",
+          "semantic_score",
+          "lexical_score",
+          "dimension_score",
+          "is_proposed",
+          "is_associated",
+          "rejected_by_human",
+          "weights",
+          "semantic",
+          "lexical",
+          "dimensions",
+          "features",
+          "differences",
+          "exclusions",
+          "review_flags",
+          "retrieved_by"
+        ],
+        "title": "CandidateOut"
+      },
       "CatalogSyncJobIn": {
         "properties": {
           "task": {
@@ -4151,6 +5880,18 @@
             "minimum": 0.0,
             "title": "Max Missing Ratio",
             "default": 0.2
+          },
+          "retry_failed_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Failed Run Id",
+            "description": "only the pages that failed in that catalog run: its failed product pages and failed listing pages with their sub-pages (no full crawl, never a full sync)"
           }
         },
         "additionalProperties": false,
@@ -4846,6 +6587,32 @@
         "type": "object",
         "title": "CategoryUpdate"
       },
+      "CompareOut": {
+        "properties": {
+          "product": {
+            "$ref": "#/components/schemas/ProductBriefOut"
+          },
+          "analysis": {
+            "$ref": "#/components/schemas/ProductAnalysisOut"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/CandidateOut"
+          },
+          "semantic_available": {
+            "type": "boolean",
+            "title": "Semantic Available",
+            "description": "false: an embedding is missing, the score uses the other criteria"
+          }
+        },
+        "type": "object",
+        "required": [
+          "product",
+          "analysis",
+          "candidate",
+          "semantic_available"
+        ],
+        "title": "CompareOut"
+      },
       "CompetitorDetailOut": {
         "properties": {
           "id": {
@@ -5117,6 +6884,102 @@
         ],
         "title": "CompetitorStats"
       },
+      "DifferenceOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "dimension",
+              "feature"
+            ],
+            "title": "Kind"
+          },
+          "field": {
+            "type": "string",
+            "title": "Field"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "competitor": {
+            "title": "Competitor"
+          },
+          "reference": {
+            "title": "Reference"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "relative_difference": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Difference"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "field",
+          "competitor",
+          "reference"
+        ],
+        "title": "DifferenceOut"
+      },
+      "DimensionsOut": {
+        "properties": {
+          "comparable": {
+            "type": "boolean",
+            "title": "Comparable"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "measures": {
+            "items": {
+              "$ref": "#/components/schemas/MeasureOut"
+            },
+            "type": "array",
+            "title": "Measures"
+          }
+        },
+        "type": "object",
+        "required": [
+          "comparable",
+          "score",
+          "measures"
+        ],
+        "title": "DimensionsOut"
+      },
       "ErrorDetail": {
         "properties": {
           "code": {
@@ -5156,7 +7019,8 @@
             "type": "string",
             "enum": [
               "catalog_sync",
-              "price_refresh"
+              "price_refresh",
+              "matching"
             ],
             "title": "Task"
           },
@@ -5180,7 +7044,20 @@
                 "type": "null"
               }
             ],
-            "title": "Products"
+            "title": "Products",
+            "description": "product pages to fetch; matching: products to score"
+          },
+          "embeddings": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Embeddings",
+            "description": "matching: product texts to embed (the others are cached)"
           },
           "requests": {
             "anyOf": [
@@ -5192,7 +7069,7 @@
               }
             ],
             "title": "Requests",
-            "description": "HTTP requests (pages) the task will make"
+            "description": "HTTP requests (pages; matching: Voyage AI requests)"
           },
           "seconds_per_request": {
             "type": "number",
@@ -5254,6 +7131,82 @@
           "count"
         ],
         "title": "FacetValue"
+      },
+      "FeatureOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "product_type or a characteristic of config/matching.yaml"
+          },
+          "competitor": {
+            "title": "Competitor"
+          },
+          "reference": {
+            "title": "Reference"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "match",
+              "conflict",
+              "unknown"
+            ],
+            "title": "Status"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "exclude",
+                  "review"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "competitor",
+          "reference",
+          "status"
+        ],
+        "title": "FeatureOut"
+      },
+      "FlagOut": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "FlagOut"
       },
       "HTTPValidationError": {
         "properties": {
@@ -5317,7 +7270,8 @@
             "type": "string",
             "enum": [
               "catalog_sync",
-              "price_refresh"
+              "price_refresh",
+              "matching"
             ],
             "title": "Task"
           },
@@ -5434,6 +7388,18 @@
             ],
             "title": "Scrape Run Id"
           },
+          "resumed_from_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resumed From Job Id",
+            "description": "the job this one restarts (manual or automatic)"
+          },
           "step": {
             "anyOf": [
               {
@@ -5542,6 +7508,47 @@
         ],
         "title": "JobOut"
       },
+      "LexicalOut": {
+        "properties": {
+          "cosine": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cosine",
+            "description": "raw cosine similarity"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "normalized 0..1 sub-score"
+          },
+          "shared_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Shared Terms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cosine",
+          "score"
+        ],
+        "title": "LexicalOut"
+      },
       "MarkedCount": {
         "properties": {
           "updated": {
@@ -5555,123 +7562,170 @@
         ],
         "title": "MarkedCount"
       },
-      "MatchCreate": {
+      "MatchBriefOut": {
         "properties": {
-          "product_a_id": {
+          "match_id": {
             "type": "integer",
-            "title": "Product A Id"
-          },
-          "product_b_id": {
-            "type": "integer",
-            "title": "Product B Id"
-          },
-          "match_type": {
-            "type": "string",
-            "title": "Match Type",
-            "default": "equivalent"
-          },
-          "confidence": {
-            "anyOf": [
-              {
-                "type": "number",
-                "maximum": 1.0,
-                "minimum": 0.0
-              },
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Confidence"
+            "title": "Match Id"
           },
           "status": {
             "type": "string",
             "enum": [
-              "proposed",
+              "auto_matched",
+              "needs_review",
+              "no_match",
               "validated",
-              "rejected"
+              "rejected",
+              "deprecated"
             ],
-            "title": "Status",
-            "default": "proposed"
+            "title": "Status"
           },
-          "method": {
+          "antalis_product_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Method",
-            "default": "manual"
+            "title": "Antalis Product Id"
           },
-          "evidence": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Evidence"
-          },
-          "validated_by": {
+          "proposed_antalis_product_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Validated By"
+            "title": "Proposed Antalis Product Id"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
-          "product_a_id",
-          "product_b_id"
+          "match_id",
+          "status",
+          "antalis_product_id",
+          "proposed_antalis_product_id",
+          "score"
         ],
-        "title": "MatchCreate"
+        "title": "MatchBriefOut",
+        "description": "Matching state of a competitor product (null for reference products and unmatched ones)."
       },
-      "MatchOut": {
+      "MatchDetailOut": {
         "properties": {
           "id": {
             "type": "integer",
             "title": "Id"
           },
-          "product_a_id": {
+          "competitor_id": {
             "type": "integer",
-            "title": "Product A Id"
+            "title": "Competitor Id"
           },
-          "product_b_id": {
-            "type": "integer",
-            "title": "Product B Id"
-          },
-          "match_type": {
+          "competitor_key": {
             "type": "string",
-            "title": "Match Type"
-          },
-          "confidence": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Confidence"
+            "title": "Competitor Key"
           },
           "status": {
             "type": "string",
             "enum": [
-              "proposed",
+              "auto_matched",
+              "needs_review",
+              "no_match",
               "validated",
-              "rejected"
+              "rejected",
+              "deprecated"
             ],
-            "title": "Status"
+            "title": "Status",
+            "description": "auto_matched / validated: associated with antalis_product (engine / human); needs_review: proposal to examine; no_match: no acceptable candidate; rejected: a human confirmed there is no equivalent; deprecated: the data changed since, rerun needed"
           },
-          "method": {
+          "product": {
+            "$ref": "#/components/schemas/ProductBriefOut",
+            "description": "the competitor product"
+          },
+          "antalis_product": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductBriefOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the associated reference product"
+          },
+          "proposed_antalis_product": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductBriefOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the engine's best candidate"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "similarity score on a 0-100 scale (NOT a probability of equivalence)"
+          },
+          "runner_up_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runner Up Score",
+            "description": "score of the second candidate"
+          },
+          "score_gap": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Gap",
+            "description": "lead of the best candidate over the second one"
+          },
+          "dimensions_compared": {
+            "type": "boolean",
+            "title": "Dimensions Compared"
+          },
+          "decision_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/ReasonOut"
+            },
+            "type": "array",
+            "title": "Decision Reasons"
+          },
+          "decided_by": {
             "anyOf": [
               {
                 "type": "string"
@@ -5680,25 +7734,9 @@
                 "type": "null"
               }
             ],
-            "title": "Method"
+            "title": "Decided By"
           },
-          "evidence": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Evidence"
-          },
-          "validated_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Validated By"
-          },
-          "validated_at": {
+          "decided_at": {
             "anyOf": [
               {
                 "type": "string",
@@ -5708,7 +7746,574 @@
                 "type": "null"
               }
             ],
-            "title": "Validated At"
+            "title": "Decided At"
+          },
+          "decision_comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Comment"
+          },
+          "manual_choice": {
+            "type": "boolean",
+            "title": "Manual Choice",
+            "description": "validated with another product than the engine's proposal"
+          },
+          "deprecated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deprecated At"
+          },
+          "deprecated_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "product_changed",
+                  "antalis_product_changed",
+                  "antalis_product_missing",
+                  "antalis_product_deleted",
+                  "reset_requested"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deprecated Reason"
+          },
+          "previous_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "auto_matched",
+                  "needs_review",
+                  "no_match",
+                  "validated",
+                  "rejected",
+                  "deprecated"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Status",
+            "description": "status before deprecation"
+          },
+          "computed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computed At"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "outdated_config": {
+            "type": "boolean",
+            "title": "Outdated Config",
+            "description": "engine result computed with another matching configuration"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "analysis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductAnalysisOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null when the product can no longer be read"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateOut"
+            },
+            "type": "array",
+            "title": "Candidates",
+            "description": "latest computation: ranked candidates, then excluded ones"
+          },
+          "rejected_antalis_products": {
+            "items": {
+              "$ref": "#/components/schemas/ProductBriefOut"
+            },
+            "type": "array",
+            "title": "Rejected Antalis Products"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/MatchEventOut"
+            },
+            "type": "array",
+            "title": "History"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "competitor_id",
+          "competitor_key",
+          "status",
+          "product",
+          "antalis_product",
+          "proposed_antalis_product",
+          "score",
+          "runner_up_score",
+          "score_gap",
+          "dimensions_compared",
+          "decision_reasons",
+          "decided_by",
+          "decided_at",
+          "decision_comment",
+          "manual_choice",
+          "deprecated_at",
+          "deprecated_reason",
+          "previous_status",
+          "computed_at",
+          "job_id",
+          "outdated_config",
+          "revision",
+          "created_at",
+          "updated_at",
+          "analysis",
+          "candidates",
+          "rejected_antalis_products",
+          "history"
+        ],
+        "title": "MatchDetailOut"
+      },
+      "MatchEventOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "match_id": {
+            "type": "integer",
+            "title": "Match Id"
+          },
+          "product_id": {
+            "type": "integer",
+            "title": "Product Id"
+          },
+          "competitor_id": {
+            "type": "integer",
+            "title": "Competitor Id"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "computed",
+              "recomputed",
+              "validated",
+              "rejected",
+              "deprecated",
+              "reset"
+            ],
+            "title": "Event"
+          },
+          "from_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "auto_matched",
+                  "needs_review",
+                  "no_match",
+                  "validated",
+                  "rejected",
+                  "deprecated"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Status"
+          },
+          "to_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "auto_matched",
+                  "needs_review",
+                  "no_match",
+                  "validated",
+                  "rejected",
+                  "deprecated"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Status"
+          },
+          "from_antalis_product_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Antalis Product Id"
+          },
+          "to_antalis_product_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Antalis Product Id"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "actor": {
+            "type": "string",
+            "title": "Actor"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data",
+            "description": "snapshot of the previous state"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "product_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "match_id",
+          "product_id",
+          "competitor_id",
+          "event",
+          "from_status",
+          "to_status",
+          "from_antalis_product_id",
+          "to_antalis_product_id",
+          "score",
+          "actor",
+          "reason",
+          "job_id",
+          "data",
+          "created_at"
+        ],
+        "title": "MatchEventOut"
+      },
+      "MatchListItem": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "competitor_id": {
+            "type": "integer",
+            "title": "Competitor Id"
+          },
+          "competitor_key": {
+            "type": "string",
+            "title": "Competitor Key"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "auto_matched",
+              "needs_review",
+              "no_match",
+              "validated",
+              "rejected",
+              "deprecated"
+            ],
+            "title": "Status",
+            "description": "auto_matched / validated: associated with antalis_product (engine / human); needs_review: proposal to examine; no_match: no acceptable candidate; rejected: a human confirmed there is no equivalent; deprecated: the data changed since, rerun needed"
+          },
+          "product": {
+            "$ref": "#/components/schemas/ProductBriefOut",
+            "description": "the competitor product"
+          },
+          "antalis_product": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductBriefOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the associated reference product"
+          },
+          "proposed_antalis_product": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductBriefOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the engine's best candidate"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "similarity score on a 0-100 scale (NOT a probability of equivalence)"
+          },
+          "runner_up_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runner Up Score",
+            "description": "score of the second candidate"
+          },
+          "score_gap": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Gap",
+            "description": "lead of the best candidate over the second one"
+          },
+          "dimensions_compared": {
+            "type": "boolean",
+            "title": "Dimensions Compared"
+          },
+          "decision_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/ReasonOut"
+            },
+            "type": "array",
+            "title": "Decision Reasons"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decision_comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Comment"
+          },
+          "manual_choice": {
+            "type": "boolean",
+            "title": "Manual Choice",
+            "description": "validated with another product than the engine's proposal"
+          },
+          "deprecated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deprecated At"
+          },
+          "deprecated_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "product_changed",
+                  "antalis_product_changed",
+                  "antalis_product_missing",
+                  "antalis_product_deleted",
+                  "reset_requested"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deprecated Reason"
+          },
+          "previous_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "auto_matched",
+                  "needs_review",
+                  "no_match",
+                  "validated",
+                  "rejected",
+                  "deprecated"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Status",
+            "description": "status before deprecation"
+          },
+          "computed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Computed At"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "outdated_config": {
+            "type": "boolean",
+            "title": "Outdated Config",
+            "description": "engine result computed with another matching configuration"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
           },
           "created_at": {
             "type": "string",
@@ -5724,66 +8329,60 @@
         "type": "object",
         "required": [
           "id",
-          "product_a_id",
-          "product_b_id",
-          "match_type",
-          "confidence",
+          "competitor_id",
+          "competitor_key",
           "status",
-          "method",
-          "evidence",
-          "validated_by",
-          "validated_at",
+          "product",
+          "antalis_product",
+          "proposed_antalis_product",
+          "score",
+          "runner_up_score",
+          "score_gap",
+          "dimensions_compared",
+          "decision_reasons",
+          "decided_by",
+          "decided_at",
+          "decision_comment",
+          "manual_choice",
+          "deprecated_at",
+          "deprecated_reason",
+          "previous_status",
+          "computed_at",
+          "job_id",
+          "outdated_config",
+          "revision",
           "created_at",
           "updated_at"
         ],
-        "title": "MatchOut"
+        "title": "MatchListItem"
       },
-      "MatchUpdate": {
+      "MatchingAvailability": {
         "properties": {
-          "match_type": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Match Type"
+          "allowed": {
+            "type": "boolean",
+            "title": "Allowed"
           },
-          "confidence": {
-            "anyOf": [
-              {
-                "type": "number",
-                "maximum": 1.0,
-                "minimum": 0.0
-              },
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Confidence"
-          },
-          "status": {
+          "reason": {
             "anyOf": [
               {
                 "type": "string",
                 "enum": [
-                  "proposed",
-                  "validated",
-                  "rejected"
+                  "worker_busy",
+                  "catalog_required",
+                  "competitor_disabled",
+                  "matching_reference",
+                  "reference_missing",
+                  "matching_not_configured",
+                  "reference_catalog_required"
                 ]
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Status"
+            "title": "Reason"
           },
-          "method": {
+          "message": {
             "anyOf": [
               {
                 "type": "string"
@@ -5792,35 +8391,316 @@
                 "type": "null"
               }
             ],
-            "title": "Method"
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "allowed"
+        ],
+        "title": "MatchingAvailability"
+      },
+      "MatchingConfigOut": {
+        "properties": {
+          "reference_competitor": {
+            "type": "string",
+            "title": "Reference Competitor"
           },
-          "evidence": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Evidence"
+          "configured": {
+            "type": "boolean",
+            "title": "Configured",
+            "description": "false when VOYAGE_API_KEY is not set"
           },
-          "validated_by": {
-            "anyOf": [
-              {
-                "type": "string"
+          "engine_version": {
+            "type": "string",
+            "title": "Engine Version"
+          },
+          "thresholds": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Thresholds"
+          },
+          "weights": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "number"
               },
-              {
-                "type": "null"
-              }
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Weights"
+          },
+          "embedding": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Embedding"
+          },
+          "config": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Config",
+            "description": "the whole config/matching.yaml"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reference_competitor",
+          "configured",
+          "engine_version",
+          "thresholds",
+          "weights",
+          "embedding",
+          "config"
+        ],
+        "title": "MatchingConfigOut"
+      },
+      "MatchingJobIn": {
+        "properties": {
+          "task": {
+            "type": "string",
+            "const": "matching",
+            "title": "Task"
+          },
+          "options": {
+            "$ref": "#/components/schemas/MatchingOptionsIn"
+          }
+        },
+        "type": "object",
+        "required": [
+          "task"
+        ],
+        "title": "MatchingJobIn"
+      },
+      "MatchingOptionsIn": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "incremental",
+              "deprecated",
+              "all"
             ],
-            "title": "Validated By"
+            "title": "Mode",
+            "description": "incremental: products never matched, deprecated matches and engine results computed with another configuration or reference catalog state (the normal case); deprecated: only the deprecated matches; all: every engine result. Human decisions (validated/rejected) are never recomputed unless deprecated.",
+            "default": "incremental"
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "title": "MatchUpdate"
+        "title": "MatchingOptionsIn",
+        "description": "Options of a matching run against the reference catalog (Antalis)."
+      },
+      "MatchingSummaryOut": {
+        "properties": {
+          "competitor_id": {
+            "type": "integer",
+            "title": "Competitor Id"
+          },
+          "competitor_key": {
+            "type": "string",
+            "title": "Competitor Key"
+          },
+          "competitor_name": {
+            "type": "string",
+            "title": "Competitor Name"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/MatchingAvailability",
+            "description": "whether a matching run can start now"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts",
+            "description": "matches per status"
+          },
+          "eligible_products": {
+            "type": "integer",
+            "title": "Eligible Products",
+            "description": "active products with parsed details"
+          },
+          "never_matched": {
+            "type": "integer",
+            "title": "Never Matched"
+          },
+          "needs_review": {
+            "type": "integer",
+            "title": "Needs Review"
+          },
+          "deprecated": {
+            "type": "integer",
+            "title": "Deprecated"
+          },
+          "outdated_by_config": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outdated By Config"
+          },
+          "embedding_tokens": {
+            "type": "integer",
+            "title": "Embedding Tokens",
+            "description": "Voyage tokens spent on this competitor's products"
+          },
+          "last_computed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Computed At"
+          },
+          "job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "active matching job"
+          },
+          "last_job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "most recent finished matching job"
+          }
+        },
+        "type": "object",
+        "required": [
+          "competitor_id",
+          "competitor_key",
+          "competitor_name",
+          "availability",
+          "counts",
+          "eligible_products",
+          "never_matched",
+          "needs_review",
+          "deprecated",
+          "outdated_by_config",
+          "embedding_tokens",
+          "last_computed_at"
+        ],
+        "title": "MatchingSummaryOut"
+      },
+      "MeasureOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "unit": {
+            "type": "string",
+            "title": "Unit"
+          },
+          "competitor": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competitor"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "competitor_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competitor Source",
+            "description": "attributes or title"
+          },
+          "reference_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Source"
+          },
+          "relative_difference": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relative Difference"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "0..1; null when the measure is missing on one side"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "unit",
+          "competitor",
+          "reference"
+        ],
+        "title": "MeasureOut"
       },
       "NotificationOut": {
         "properties": {
@@ -6542,11 +9422,11 @@
         ],
         "title": "Page[JobOut]"
       },
-      "Page_MatchOut_": {
+      "Page_MatchEventOut_": {
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/MatchOut"
+              "$ref": "#/components/schemas/MatchEventOut"
             },
             "type": "array",
             "title": "Items"
@@ -6571,7 +9451,38 @@
           "limit",
           "offset"
         ],
-        "title": "Page[MatchOut]"
+        "title": "Page[MatchEventOut]"
+      },
+      "Page_MatchListItem_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MatchListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[MatchListItem]"
       },
       "Page_NotificationOut_": {
         "properties": {
@@ -6911,6 +9822,182 @@
         "title": "PriceSummary",
         "description": "Latest capture of a product, summarized for lists."
       },
+      "ProductAnalysisOut": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description_used": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Used"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "dimensions": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Dimensions"
+          },
+          "product_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Type"
+          },
+          "product_type_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Type Source"
+          },
+          "features": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Features"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "description_used",
+          "category",
+          "dimensions",
+          "product_type",
+          "product_type_source",
+          "features"
+        ],
+        "title": "ProductAnalysisOut",
+        "description": "What the engine read of the competitor product."
+      },
+      "ProductBriefOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "competitor_id": {
+            "type": "integer",
+            "title": "Competitor Id"
+          },
+          "competitor_key": {
+            "type": "string",
+            "title": "Competitor Key"
+          },
+          "catalog_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog Reference"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "missing"
+            ],
+            "title": "Status"
+          },
+          "normalized_attributes": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Attributes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "competitor_id",
+          "competitor_key",
+          "catalog_reference",
+          "title",
+          "url",
+          "brand",
+          "category",
+          "status"
+        ],
+        "title": "ProductBriefOut"
+      },
       "ProductCreate": {
         "properties": {
           "competitor": {
@@ -6944,17 +10031,6 @@
               }
             ],
             "title": "Category Id"
-          },
-          "antalis_reference": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Antalis Reference"
           },
           "external_id": {
             "anyOf": [
@@ -7105,17 +10181,6 @@
               }
             ],
             "title": "Catalog Reference"
-          },
-          "antalis_reference": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Antalis Reference"
           },
           "external_id": {
             "anyOf": [
@@ -7319,7 +10384,18 @@
           },
           "match_count": {
             "type": "integer",
-            "title": "Match Count"
+            "title": "Match Count",
+            "description": "associations (auto_matched or validated) involving this product: competitor products associated with it for a reference product, 0 or 1 for a competitor product"
+          },
+          "matching": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MatchBriefOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -7329,7 +10405,6 @@
           "category_id",
           "identity_key",
           "catalog_reference",
-          "antalis_reference",
           "external_id",
           "url",
           "title",
@@ -7432,17 +10507,6 @@
               }
             ],
             "title": "Catalog Reference"
-          },
-          "antalis_reference": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Antalis Reference"
           },
           "external_id": {
             "anyOf": [
@@ -7598,7 +10662,6 @@
           "category_id",
           "identity_key",
           "catalog_reference",
-          "antalis_reference",
           "external_id",
           "url",
           "title",
@@ -7652,17 +10715,6 @@
               }
             ],
             "title": "Category Id"
-          },
-          "antalis_reference": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Antalis Reference"
           },
           "external_id": {
             "anyOf": [
@@ -7892,6 +10944,153 @@
         },
         "type": "object",
         "title": "ProgressOut"
+      },
+      "ReasonOut": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "score_above_auto, clear_gap, single_candidate, ambiguous_gap, review_band, score_below_review, no_compatible_candidate, feature_conflict, dimensions_not_comparable, previously_validated, previous_association_changed"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ReasonOut"
+      },
+      "RejectIn": {
+        "properties": {
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RejectIn"
+      },
+      "RerunIn": {
+        "properties": {
+          "competitor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Competitor",
+            "description": "competitor key; default: every competitor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RerunIn"
+      },
+      "RerunOut": {
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobOut"
+            },
+            "type": "array",
+            "title": "Jobs"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/RerunRefusal"
+            },
+            "type": "array",
+            "title": "Refused"
+          },
+          "nothing_to_do": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Nothing To Do",
+            "description": "competitors without deprecated matches"
+          }
+        },
+        "type": "object",
+        "required": [
+          "jobs",
+          "refused",
+          "nothing_to_do"
+        ],
+        "title": "RerunOut"
+      },
+      "RerunRefusal": {
+        "properties": {
+          "competitor_key": {
+            "type": "string",
+            "title": "Competitor Key"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "competitor_key",
+          "code",
+          "message"
+        ],
+        "title": "RerunRefusal"
+      },
+      "ResetIn": {
+        "properties": {
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "clear_rejections": {
+            "type": "boolean",
+            "title": "Clear Rejections",
+            "description": "also forget the products rejected by reviewers",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ResetIn"
       },
       "RunDetailOut": {
         "properties": {
@@ -8342,6 +11541,40 @@
         ],
         "title": "RunOut"
       },
+      "SignalOut": {
+        "properties": {
+          "cosine": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cosine",
+            "description": "raw cosine similarity"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "normalized 0..1 sub-score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cosine",
+          "score"
+        ],
+        "title": "SignalOut"
+      },
       "StatsOut": {
         "properties": {
           "competitors": {
@@ -8458,7 +11691,11 @@
                 "enum": [
                   "worker_busy",
                   "catalog_required",
-                  "competitor_disabled"
+                  "competitor_disabled",
+                  "matching_reference",
+                  "reference_missing",
+                  "matching_not_configured",
+                  "reference_catalog_required"
                 ]
               },
               {
@@ -8494,6 +11731,48 @@
           "by_level"
         ],
         "title": "UnreadCount"
+      },
+      "ValidateIn": {
+        "properties": {
+          "antalis_product_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Antalis Product Id",
+            "description": "reference product to associate; default: the engine's proposal"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By",
+            "description": "name of the reviewer (history)"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ValidateIn"
       },
       "ValidationError": {
         "properties": {

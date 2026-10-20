@@ -77,7 +77,7 @@ def test_worker_lifecycle_through_the_api(client, worker):
     assert r.status_code == 409 and r.json()["error"]["code"] == "catalog_required"
 
     detail = client.get("/api/v1/competitors/toy").json()
-    assert set(detail["estimates"]) == {"catalog_sync", "price_refresh"}
+    assert set(detail["estimates"]) == {"catalog_sync", "price_refresh", "matching"}
 
     r = client.post("/api/v1/competitors/toy/worker/start", json={"task": "catalog_sync"})
     assert r.status_code == 202, r.text
@@ -189,9 +189,10 @@ def test_catalog_data_read_and_crud(client, worker):
     assert client.delete(f"/api/v1/observations/{obs.json()['id']}").status_code == 204
     assert client.get(f"/api/v1/products/{new['id']}").json()["last_price_observed_at"] is None
 
-    # matches need two competitors: refused within one
-    r = client.post("/api/v1/product-matches", json={"product_a_id": first["id"], "product_b_id": new["id"]})
-    assert r.status_code == 422
+    # a product never matched has no matching state
+    assert client.get(f"/api/v1/products/{new['id']}").json()["matching"] is None
+    r = client.get(f"/api/v1/matching/products/{new['id']}")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "match_not_found"
 
     assert client.delete(f"/api/v1/products/{first['id']}").status_code == 204
     assert client.get(f"/api/v1/products/{first['id']}").status_code == 404
@@ -269,3 +270,31 @@ def test_api_refuses_to_start_without_key(config_dir, monkeypatch):
     settings = Settings(None, None, config_dir, "INFO", None)
     with pytest.raises(SettingsError):
         create_app(settings, object(), api_key=None, auth_disabled=False, sync_competitors=False)
+
+
+@pytest.mark.db
+def test_retry_failed_pages_and_restart_through_the_api(client, worker):
+    r = client.post("/api/v1/competitors/toy/worker/start", json={"task": "catalog_sync"})
+    assert r.status_code == 202
+    worker()
+    job = client.get(f"/api/v1/jobs/{r.json()['id']}").json()
+    assert job["status"] == "succeeded" and job["resumed_from_job_id"] is None
+    run_id = job["scrape_run_id"]
+    r = client.post(f"/api/v1/runs/{run_id}/retry-failed")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "nothing_to_retry"
+    r = client.post(f"/api/v1/jobs/{job['id']}/restart")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "job_not_restartable"
+
+    r = client.post("/api/v1/competitors/toy/worker/start", json={"task": "price_refresh", "options": {"limit": 1}})
+    stopped = client.post(f"/api/v1/jobs/{r.json()['id']}/cancel").json()
+    assert stopped["status"] == "cancelled"
+    restarted = client.post(f"/api/v1/jobs/{stopped['id']}/restart")
+    assert restarted.status_code == 202, restarted.text
+    assert restarted.json()["resumed_from_job_id"] == stopped["id"]
+    assert restarted.json()["options"]["limit"] == 1 and restarted.json()["options"]["skip_fresh_hours"] > 0
+
+    other = client.post(
+        "/api/v1/competitors/toy/worker/start",
+        json={"task": "catalog_sync", "options": {"retry_failed_run_id": 999999}},
+    )
+    assert other.status_code == 422 and other.json()["error"]["code"] == "invalid_options"

@@ -35,6 +35,8 @@ class CompetitorConfig:
     # Expected catalog size, used to estimate durations before any run history exists:
     # {"listing_pages": int, "products": int}
     estimate_hints: dict[str, Any] = field(default_factory=dict)
+    # Product matching options of this competitor (text cleaning), see config/matching.yaml.
+    matching: dict[str, Any] = field(default_factory=dict)
     source_path: Path | None = None
 
     @property
@@ -50,6 +52,7 @@ class CompetitorConfig:
             "default_currency": self.default_currency,
             "scrapedo": self.scrapedo,
             "options": self.options,
+            "matching": self.matching,
             "source_path": str(self.source_path) if self.source_path else None,
         }
 
@@ -78,6 +81,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
         "scrapedo",
         "options",
         "estimate_hints",
+        "matching",
     }
     unknown = set(data) - known
     if unknown:
@@ -95,6 +99,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
         scrapedo=dict(data.get("scrapedo") or {}),
         options=dict(data.get("options") or {}),
         estimate_hints=dict(data.get("estimate_hints") or {}),
+        matching=dict(data.get("matching") or {}),
         source_path=source_path,
     )
 

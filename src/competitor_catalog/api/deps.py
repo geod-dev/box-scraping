@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from competitor_catalog.core.config import CompetitorConfig
 from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import Competitor
+from competitor_catalog.matching.service import MatchingRuntime
 
 
 class ApiError(Exception):
@@ -77,6 +78,13 @@ def get_configs(request: Request) -> dict[str, CompetitorConfig]:
 
 
 ConfigsDep = Annotated[dict[str, CompetitorConfig], Depends(get_configs)]
+
+
+def get_matching(request: Request) -> MatchingRuntime:
+    return request.app.state.matching
+
+
+MatchingDep = Annotated[MatchingRuntime, Depends(get_matching)]
 
 
 def competitor_or_404(session: Session, key: str) -> Competitor:

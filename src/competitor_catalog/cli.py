@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from competitor_catalog.app import build_context, build_fetcher, session_factory
+from competitor_catalog.app import build_context, build_fetcher, build_matching_runtime, session_factory
 from competitor_catalog.core.config import load_competitor_config, load_competitor_configs
 from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import Category, Product, ScrapeRun, ScrapeRunItem
@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     settings = load_settings()
     register_secret(settings.scrapedo_api_key)
+    register_secret(settings.voyage_api_key)
     configure_logging(args.log_level or settings.log_level)
     return int(args.func(args, settings) or 0)
 
@@ -95,6 +96,11 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--run", type=int)
     s.add_argument("--limit", type=int, default=15)
     s.set_defaults(func=cmd_runs)
+
+    s = sub.add_parser("match", help="match a competitor's products with the reference catalog (Antalis)")
+    s.add_argument("--competitor", required=True)
+    s.add_argument("--mode", choices=["incremental", "deprecated", "all"], default="incremental")
+    s.set_defaults(func=cmd_match)
 
     s = sub.add_parser("worker", help="run migrations, then execute the jobs requested through the API")
     s.add_argument("--once", action="store_true", help="one scheduling pass, wait for the started jobs, exit")
@@ -210,6 +216,25 @@ def cmd_price_refresh(args: argparse.Namespace, settings: Any) -> int:
     return 0 if result.status == "succeeded" else 2
 
 
+def cmd_match(args: argparse.Namespace, settings: Any) -> int:
+    from competitor_catalog.matching.service import MatchingError, MatchingOptions, MatchingRun
+
+    ctx = build_context(settings, args.competitor)
+    try:
+        result = MatchingRun(
+            ctx.factory,
+            ctx.competitor_id,
+            build_matching_runtime(settings),
+            MatchingOptions(args.mode),
+            competitor_options=ctx.config.matching,
+        ).run()
+    except MatchingError as exc:
+        print(f"refused: {exc.code}: {exc.message}", file=sys.stderr)
+        return 2
+    print(json.dumps({"status": result.status, **result.counters}, indent=2))
+    return 0
+
+
 def _product(session: Any, competitor_key: str, reference: str) -> Product:
     competitor = repo.get_competitor(session, competitor_key)
     if competitor is None:
@@ -255,7 +280,6 @@ def cmd_product(args: argparse.Namespace, settings: Any) -> int:
             "id": product.id,
             "identity_key": product.identity_key,
             "catalog_reference": product.catalog_reference,
-            "antalis_reference": product.antalis_reference,
             "external_id": product.external_id,
             "url": product.url,
             "title": product.title,
@@ -373,6 +397,7 @@ def cmd_worker(args: argparse.Namespace, settings: Any) -> int:
         settings.competitor_config_dir,
         lambda config: build_fetcher(settings, config),
         DispatcherConfig.from_env(),
+        matching=build_matching_runtime(settings),
     )
     if args.once:
         dispatcher.startup()

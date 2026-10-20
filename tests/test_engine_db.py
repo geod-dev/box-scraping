@@ -19,6 +19,7 @@ from competitor_catalog.db.models import Category, Product, ScrapeObservation, S
 from competitor_catalog.db.session import transaction
 from competitor_catalog.services.catalog_sync import CatalogSync, CatalogSyncOptions
 from competitor_catalog.services.price_refresh import PriceRefresh, PriceRefreshOptions
+from competitor_catalog.services.runs import RunObserver
 from competitor_catalog.settings import DEFAULT_COMPETITOR_CONFIG_DIR
 from tests.conftest import FakeFetcher, fixture_text
 from tests.toy_adapter import BASE, toy_site
@@ -78,6 +79,8 @@ def toy(factory):
 
     env = Env()
     env.factory = factory
+    env.adapter = adapter
+    env.competitor_id = competitor_id
     env.competitor_id = competitor_id
     return env
 
@@ -291,6 +294,24 @@ def test_retry_failed_from_a_catalog_run_matches_by_url(toy):
     assert fetcher.requests == [f"{BASE}/p/A3"]
 
 
+def test_catalog_retry_refetches_only_the_failed_pages(toy):
+    site = toy_site()
+    # first sync: a listing page and a product page fail; B1 (under cat-b) and A3 are never created
+    failed, _ = toy.sync(site, failing={f"{BASE}/cat-b", f"{BASE}/p/A3"})
+    assert failed.status == "partial" and set(toy.products()) == {"A1", "A2"}
+    retry, fetcher = toy.sync(site, retry_failed_run_id=failed.run_id, resume_within_hours=48)
+    assert retry.status == "succeeded"
+    assert sorted(fetcher.requests) == sorted([f"{BASE}/cat-b", f"{BASE}/p/B1", f"{BASE}/p/A3"])
+    assert set(toy.products()) == {"A1", "A2", "A3", "B1"}
+    with transaction(toy.factory) as s:
+        run = s.get(ScrapeRun, retry.run_id)
+        assert run.full_scope is False and run.params["retry_failed_run_id"] == failed.run_id
+        assert s.scalar(select(func.count()).select_from(Product).where(Product.status == "missing")) == 0
+    # a listing page failing again is a failed page, not a fatal error
+    again, _ = toy.sync(site, retry_failed_run_id=failed.run_id, failing={f"{BASE}/cat-b"})
+    assert again.status == "partial"
+
+
 def test_resume_skips_recently_synced_products_but_counts_them_as_seen(toy):
     site = toy_site()
     first, _ = toy.sync(site, max_products=2)  # interrupted sweep: 2 products synced
@@ -427,7 +448,7 @@ def test_antalis_family_end_to_end_on_fixtures(factory):
 
     with transaction(factory) as s:
         product = s.scalar(select(Product).where(Product.catalog_reference == "503623"))
-        assert product.identity_key == "ref:503623" and product.antalis_reference == "503623"
+        assert product.identity_key == "ref:503623"
         assert product.category.external_id == "HQ02953"
         assert product.category.name == "Caisse Carton à hauteur variable et à fond automatique"
         assert product.normalized_attributes["length_mm"] == 305
@@ -447,3 +468,33 @@ def test_antalis_family_end_to_end_on_fixtures(factory):
         assert s.scalar(select(func.count()).select_from(Product)) == 4
         pid = s.scalar(select(Product.id).where(Product.catalog_reference == "503623"))
         assert len(repo.price_history(s, pid)) == 3  # 2 catalog runs + 1 price refresh
+
+
+def test_a_resumed_sync_replays_the_listing_pages_of_the_interrupted_one(toy):
+    from competitor_catalog.db.models import ListingPageCache
+    from competitor_catalog.services.runs import RunInterrupted
+
+    site = toy_site()
+
+    class StopAfterTwoProducts(RunObserver):
+        def progress(self, step, done, goal=None, pending=None):
+            if step == "sync_products" and done == 2:
+                raise RunInterrupted("redeploy")
+
+    fetcher = FakeFetcher(site)
+    with pytest.raises(RunInterrupted):
+        CatalogSync(toy.adapter, fetcher, toy.factory, toy.competitor_id, StopAfterTwoProducts()).run(
+            CatalogSyncOptions()
+        )
+    with transaction(toy.factory) as s:
+        assert s.scalar(select(func.count()).select_from(ListingPageCache)) == 4
+    resumed, fetcher = toy.sync(site, resume_within_hours=48)
+    assert resumed.status == "succeeded"
+    assert [u for u in fetcher.requests if "/p/" not in u] == []  # no listing page requested again
+    assert len(fetcher.requests) == 2  # only the 2 products not synced yet
+    assert set(toy.products()) == {"A1", "A2", "A3", "B1"}
+    with transaction(toy.factory) as s:
+        run = s.get(ScrapeRun, resumed.run_id)
+        assert run.full_scope and run.stats["listing_pages_replayed"] == 4 and run.pages_fetched == 2
+        assert s.scalar(select(func.count()).select_from(ListingPageCache)) == 0  # completed: purged
+        assert s.scalar(select(func.count()).select_from(Product).where(Product.status == "missing")) == 0

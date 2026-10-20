@@ -183,6 +183,16 @@ def test_product_without_price_is_not_a_failure(adapter):
     assert product.prices.reason == "no price shown"
 
 
+def test_placeholder_price_without_currency_is_no_price(adapter):
+    # P00868 (2026-10-20): Intershop shows a product without price as 0.0 "N/A"
+    url = f"{API}/products/P00868?{EXPAND}"
+    product = adapter.parse_product(page("product_no_price_P00868.json", url))
+    assert product.catalog_reference == "P00868" and product.title == "Crème lavante mains nacrée"
+    assert product.prices.price_found is False and product.prices.tiers == []
+    assert product.prices.reason == "no price shown (placeholder price, currency 'N/A')"
+    assert adapter.parse_prices(page("product_no_price_P00868.json", url)).prices.price_found is False
+
+
 def test_promotion_is_flagged_when_sale_price_is_below_list_price(adapter):
     data = raw("product_variant_MCFA23.json")
     data["listPrice"] = {"value": 4.5, "currency": "EUR"}

@@ -7,7 +7,9 @@
 * writes a heartbeat (``service_heartbeats``) so the API can tell whether the worker is up;
 * on SIGTERM/SIGINT (redeploy, ``docker stop``) running jobs stop at the next page and are
   closed as ``interrupted``; at start-up, jobs left running by a killed process are closed
-  the same way. Nothing is restarted automatically: by default nothing runs unless asked.
+  the same way, then the interrupted jobs are restarted where they stopped
+  (``WORKER_AUTO_RESUME``, default true; see :func:`jobs.auto_resume_interrupted`). Apart from
+  that, nothing runs unless asked.
 """
 
 from __future__ import annotations
@@ -27,8 +29,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from competitor_catalog.core.config import CompetitorConfig, load_competitor_configs
 from competitor_catalog.db import repositories as repo
+from competitor_catalog.db.migrate import schema_is_newer
 from competitor_catalog.db.models import ServiceHeartbeat, WorkerJob
 from competitor_catalog.db.session import transaction
+from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.services import jobs
 from competitor_catalog.services.runs import utcnow
 from competitor_catalog.services.worker import WorkerConfig, abort_stale_runs, load_history, next_operation
@@ -45,6 +49,7 @@ class DispatcherConfig:
     stale_job_after: timedelta = timedelta(minutes=30)
     shutdown_grace_seconds: float = 60.0
     auto_schedule: WorkerConfig | None = None  # None = nothing runs unless requested
+    auto_resume: bool = False  # restart jobs interrupted by a worker restart (env default: true)
 
     @classmethod
     def from_env(cls) -> DispatcherConfig:
@@ -55,6 +60,7 @@ class DispatcherConfig:
             stale_job_after=timedelta(minutes=float(os.environ.get("STALE_JOB_MINUTES", "30"))),
             shutdown_grace_seconds=float(os.environ.get("WORKER_SHUTDOWN_GRACE_SECONDS", "60")),
             auto_schedule=WorkerConfig.from_env() if auto else None,
+            auto_resume=os.environ.get("WORKER_AUTO_RESUME", "true").strip().lower() in ("1", "true", "yes", "on"),
         )
 
 
@@ -68,7 +74,9 @@ class Dispatcher:
         *,
         write_interval: float = 2.0,
         pause_poll_seconds: float = 2.0,
+        matching: MatchingRuntime | None = None,
     ):
+        self.matching = matching
         self.pause_poll_seconds = pause_poll_seconds
         self.factory = factory
         self.config_dir = config_dir
@@ -80,6 +88,7 @@ class Dispatcher:
         self.threads: dict[int, threading.Thread] = {}
         self.configs: dict[str, CompetitorConfig] = {}
         self.started_at = utcnow()
+        self.outdated = False  # a newer release migrated the database: start nothing more
 
     # ------------------------------------------------------------------ lifecycle
     def startup(self) -> None:
@@ -90,6 +99,7 @@ class Dispatcher:
         runs = abort_stale_runs(self.factory, timedelta(0))
         if runs:
             log.warning("closed %d scrape run(s) left running", runs)
+        self.resume_interrupted()
         self.heartbeat()
         log.info(
             "worker %s ready: max %d concurrent jobs, auto schedule %s",
@@ -114,7 +124,10 @@ class Dispatcher:
         stale = jobs.interrupt_orphan_jobs(self.factory, self.instance, stale_after=self.config.stale_job_after)
         if stale:
             log.warning("closed %d stale job(s) of another worker instance: %s", len(stale), stale)
+            self.resume_interrupted()
         if self.stop_event.is_set():
+            return []
+        if self.schema_outdated():
             return []
         if self.config.auto_schedule is not None:
             self.schedule_due_jobs(self.config.auto_schedule)
@@ -126,6 +139,24 @@ class Dispatcher:
             log.info("started job #%s", job_id)
         return started
 
+    def schema_outdated(self) -> bool:
+        """During a deploy the old worker keeps running while the new release migrates the
+        database: it then finishes its running jobs but claims no new one."""
+        if not self.outdated:
+            with transaction(self.factory) as session:
+                self.outdated = schema_is_newer(session)
+            if self.outdated:
+                log.warning("the database schema is newer than this worker: no new job will be started")
+        return self.outdated
+
+    def resume_interrupted(self) -> list[int]:
+        if not self.config.auto_resume:
+            return []
+        created = jobs.auto_resume_interrupted(self.factory, self.configs, self.matching)
+        if created:
+            log.warning("resumed %d interrupted job(s) automatically: %s", len(created), created)
+        return created
+
     def _run(self, job_id: int) -> None:
         status = jobs.run_job(
             self.factory,
@@ -135,12 +166,17 @@ class Dispatcher:
             self.stop_event,
             write_interval=self.write_interval,
             pause_poll_seconds=self.pause_poll_seconds,
+            matching=self.matching,
         )
         log.info("job #%s finished: %s", job_id, status)
 
     def heartbeat(self) -> None:
         now = utcnow()
-        details = {"running_jobs": sorted(self.threads), "auto_schedule": self.config.auto_schedule is not None}
+        details = {
+            "running_jobs": sorted(self.threads),
+            "auto_schedule": self.config.auto_schedule is not None,
+            "schema_outdated": self.outdated,
+        }
         with transaction(self.factory) as session:
             session.execute(
                 insert(ServiceHeartbeat)

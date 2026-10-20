@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from competitor_catalog.db import repositories as repo
-from competitor_catalog.db.models import Competitor, Notification, ScrapeRun, WorkerJob
+from competitor_catalog.db.models import Competitor, Notification, Product, ScrapeRun, WorkerJob
 from competitor_catalog.db.session import transaction
 from competitor_catalog.services import jobs
 from competitor_catalog.services.dispatcher import Dispatcher, DispatcherConfig
@@ -432,3 +432,105 @@ def test_progress_written_after_checkpoint_is_not_one_page_late(env):
     job = env.job(job_id)
     assert job.step_done == 1 and job.counters["pages_fetched"] == 1
     assert job.progress["requests_done"] == 1
+
+
+# --------------------------------------------------------------------------- restart / auto resume
+
+
+def test_a_redeploy_interrupts_then_the_new_worker_resumes_where_it_stopped(factory, config_dir):
+    holder = {}
+    env = Env(factory, config_dir, lambda config: CancellingFetcher(toy_site(), 6, holder["stop"].set))
+    holder["stop"] = env.dispatcher.stop_event
+    job_id = env.enqueue("catalog_sync")
+    env.run_all()
+    assert env.job(job_id).status == "interrupted"
+    with transaction(factory) as s:
+        synced = s.query(Product).filter(Product.details_updated_at.is_not(None)).count()
+    assert 0 < synced < 4
+
+    fetchers: list[FakeFetcher] = []
+
+    def fetcher(config):
+        fetchers.append(FakeFetcher(toy_site()))
+        return fetchers[-1]
+
+    restarted = Dispatcher(factory, config_dir, fetcher, DispatcherConfig(poll_seconds=0, auto_resume=True))
+    restarted.startup()  # the redeployed worker
+    with transaction(factory) as s:
+        new = s.scalar(select(WorkerJob).where(WorkerJob.resumed_from_job_id == job_id))
+        assert new.requested_by == "auto_resume" and new.status == "queued"
+        assert new.options["resume_within_hours"] >= 48
+    note = [n for n in env.notifications() if n.kind == "job_auto_resumed"]
+    assert len(note) == 1 and note[0].data["resumed_from_job_id"] == job_id
+    restarted.tick()
+    for thread in list(restarted.threads.values()):
+        thread.join(30)
+    assert env.job(new.id).status == "succeeded"
+    products_fetched = [u for u in fetchers[0].requests if "/p/" in u]
+    assert len(products_fetched) == 4 - synced  # the products synced before the interruption are skipped
+    Dispatcher(factory, config_dir, fetcher, DispatcherConfig(poll_seconds=0, auto_resume=True)).startup()
+    with transaction(factory) as s:
+        assert s.query(WorkerJob).count() == 2  # already resumed: not twice
+
+
+def test_auto_resume_gives_up_after_repeated_interruptions(env, factory):
+    previous = None
+    for i in range(jobs.AUTO_RESUME_MAX + 1):
+        with transaction(factory) as s:
+            job = WorkerJob(
+                competitor_id=env.competitor().id,
+                task="price_refresh",
+                status="interrupted",
+                options={},
+                requested_by="api" if i == 0 else "auto_resume",
+                resumed_from_job_id=previous,
+                started_at=utcnow() - timedelta(minutes=5),
+                finished_at=utcnow(),
+            )
+            s.add(job)
+            s.flush()
+            previous = job.id
+    assert jobs.auto_resume_interrupted(factory, env.configs) == []
+    assert jobs.auto_resume_interrupted(factory, env.configs) == []
+    stopped = [n for n in env.notifications() if n.kind == "job_auto_resume_stopped"]
+    assert len(stopped) == 1 and stopped[0].job_id == previous
+
+
+def test_restart_skips_the_work_already_done(env):
+    with transaction(env.factory) as s:
+        job = WorkerJob(
+            competitor_id=env.competitor().id,
+            task="price_refresh",
+            status="cancelled",
+            options={"skip_fresh_hours": 1, "limit": 3},
+            started_at=utcnow() - timedelta(hours=5),
+            finished_at=utcnow(),
+        )
+        s.add(job)
+        s.flush()
+        competitor = s.get(Competitor, job.competitor_id)
+        competitor.last_full_catalog_at = utcnow()
+        new = jobs.restart_job(s, job, env.configs["toy"])
+        assert new.resumed_from_job_id == job.id and new.options["limit"] == 3
+        assert 5 < new.options["skip_fresh_hours"] < 5.2
+        done = WorkerJob(competitor_id=competitor.id, task="catalog_sync", status="succeeded", options={})
+        s.add(done)
+        s.flush()
+        with pytest.raises(jobs.JobRequestError) as error:
+            jobs.restart_job(s, done, env.configs["toy"])
+        assert error.value.code == "job_not_restartable"
+
+
+def test_an_old_worker_starts_no_job_once_a_newer_release_migrated(env, factory):
+    from sqlalchemy import text
+
+    job_id = env.enqueue("catalog_sync")
+    with transaction(factory) as s:
+        current = s.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        s.execute(text("UPDATE alembic_version SET version_num = 'from_the_future'"))
+    try:
+        assert env.dispatcher.tick() == []
+        assert env.job(job_id).status == "queued" and env.dispatcher.outdated
+    finally:
+        with transaction(factory) as s:
+            s.execute(text("UPDATE alembic_version SET version_num = :v"), {"v": current})

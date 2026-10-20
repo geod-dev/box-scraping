@@ -111,7 +111,6 @@ class ProductData:
     catalog_reference: str | None
     prices: PriceSnapshot
     external_id: str | None = None
-    antalis_reference: str | None = None
     title: str | None = None
     description: str | None = None
     long_description: str | None = None

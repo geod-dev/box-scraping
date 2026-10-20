@@ -1,0 +1,136 @@
+# Product matching: every product of the other competitors is associated with the product of
+# the reference catalog (Antalis) that corresponds to it best. See README.md "Product matching".
+#
+# Every value here is a starting point meant to be tuned after evaluation. Changing this file
+# changes the config hash: the next incremental matching run recomputes the engine results
+# (human decisions are kept). Scores are similarity scores on a 0-100 scale, NOT probabilities.
+
+reference_competitor: antalis_fr
+
+embedding:
+  provider: voyage
+  model: voyage-4
+  dimensions: 1024          # voyage-4 supports 256, 512, 1024 (default), 2048
+  input_type: null          # null = symmetric product-to-product similarity (no query/document prompt)
+  batch_size: 128           # texts per API request (API limit: 1000)
+  max_batch_tokens: 100000  # estimated tokens per request (API limit: 320K for voyage-4)
+  max_description_chars: 1500
+  # Rate limits of the Voyage account; requests are paced to stay within them. Without a
+  # payment method on the account (free tokens only), Voyage allows 3 requests and 10K tokens
+  # per minute: ~10K tokens/min, i.e. about 1 hour per 6000 new products. With a payment
+  # method (the free tokens stay free): 2000 RPM / 8M TPM for voyage-4 -> set them here.
+  requests_per_minute: 3
+  tokens_per_minute: 10000
+
+retrieval:
+  # Candidates gathered by each signal before re-ranking (union, without duplicates).
+  semantic_top_k: 25
+  lexical_top_k: 25
+  dimension_top_k: 15
+  stored_candidates: 10     # ranked candidates kept per product (for review)
+  stored_excluded: 5        # best excluded candidates kept too, to explain exclusions
+
+weights:
+  # Applied when the dimensions are reliable and comparable on both sides.
+  with_dimensions: {semantic: 0.50, lexical: 0.20, dimensions: 0.30}
+  without_dimensions: {semantic: 0.75, lexical: 0.25}
+
+normalization:
+  # Raw cosine similarities -> 0..1 sub-scores: floor -> 0, ceiling -> 1, linear in between.
+  # voyage-4 gives ~0.5 between unrelated packaging products and 0.92-0.97 between two
+  # descriptions of the same product (calibration probe, 2026-10-20).
+  semantic: {floor: 0.55, ceiling: 0.95}
+  # TF-IDF cosine of the words (numbers excluded: dimensions are compared separately).
+  lexical: {floor: 0.0, ceiling: 0.60}
+
+dimensions:
+  # Relative difference |a - b| / max(a, b) -> sub-score: 1 up to full_score_within,
+  # 0 from zero_score_beyond, linear in between. A box with one wrong dimension scores 0 on it.
+  full_score_within: 0.02
+  zero_score_beyond: 0.20
+
+thresholds:
+  auto_match: 90     # score >= 90 and ...
+  min_gap: 8         # ... ahead of the second candidate by >= 8 points -> automatic association
+  review: 75         # 75 <= score (or >= 90 but ambiguous / conflicting) -> human review
+                     # below 75 -> no association
+
+# Product type of each product, read in its title (else its category name): the keyword found
+# first in the text wins, the longest one on a tie. Two products with known, different and not
+# compatible types are never matched ("certain incompatibility"). Keywords are case and accent
+# insensitive and match whole words (a final s/x is tolerated).
+product_types:
+  machine: [machine, fermeuse, cercleuse, banderoleuse, scelleuse, soudeuse, formeuse, "fermeture de caisses", encarteuse, "systeme de pesage"]
+  scale: [balance, "pese lettre", "pese lettres", "pese colis"]
+  dispenser: [devidoir, "derouleur", "distributeur de ruban", "distributeur de film"]
+  tool: [cutter, agrafeuse, pince, ciseaux, pistolet, applicateur, marqueur, "lame", "couteau"]
+  tape: ["ruban adhesif", adhesif, "bande gommee", "ruban de masquage", scotch, "ruban kraft"]
+  stretch_film: ["film etirable", "papier etirable", "film palette", "film de palettisation", "film machine"]
+  shrink_film: ["film retractable", "gaine retractable", "housse retractable"]
+  bubble_wrap: ["film bulle", "papier bulle", "film a bulles", "rouleau bulle", "bulles d'air"]
+  void_fill: [calage, "chips de calage", "coussin d'air", "coussins d'air", frisure, "particules de calage", "papier de calage"]
+  strapping: [feuillard, "cerclage", "boucle de cerclage", "chape de cerclage"]
+  corner: [corniere, "protege angle", "protege-angle", "coin de protection"]
+  label: [etiquette, "etiquettes"]
+  envelope: [enveloppe, pochette, "sac postal", "pochette d'expedition"]
+  bag: [sac, sachet, "sac poubelle", housse, "sac zip"]
+  tube: ["tube carton", "tube d'expedition", "tube postal", "tube"]
+  crate: [bac, "caisse plastique", "caisse en plastique", "boite plastique", conteneur, "bac gerbable"]
+  pallet: [palette]
+  corrugated_sheet: ["carton ondule", "plaque carton", "feuille carton", "plaque de carton", "rouleau carton ondule", intercalaire]
+  box: [caisse, carton, boite, "boite postale", etui, coffret, "colis", "container carton"]
+  paper: ["papier kraft", "papier de soie", "papier", rame]
+  furniture: [vestiaire, banc, socle, armoire, etabli, chaise, siege, rayonnage, etagere, "kit pieds", table, servante, chariot]
+  glove: [gant, gants]
+  office: [stylo, roller, cahier, classeur, surligneur, crayon, trombone, "bloc notes", "post-it"]
+  hygiene: ["essuie mains", "essuie-mains", "papier toilette", "papier hygienique", savon, "lingette", "bobine d'essuyage"]
+
+# Pairs of different types that can still be equivalent (never excluded from each other).
+compatible_types:
+  - [envelope, bag]
+  - [bubble_wrap, void_fill]
+  - [paper, void_fill]
+  - [box, corrugated_sheet]
+  - [dispenser, tool]
+
+# Characteristics read in the title, the description and the normalized attributes. A product
+# can carry several values (e.g. "blanc ou brun"); two products conflict on a feature when both
+# have values and none is shared.
+#   policy exclude: a conflict is a certain incompatibility (the candidate is excluded);
+#   policy review:  a conflict blocks the automatic association (human review), score unchanged.
+features:
+  flute_wall:
+    policy: exclude
+    values:
+      single: ["simple cannelure", "simple canelure", "simple cannelures"]
+      double: ["double cannelure", "double canelure", "double cannelures"]
+      triple: ["triple cannelure", "triple canelure", "triple cannelures"]
+  color:
+    policy: review
+    values:
+      brown: [brun, brune, havane, ecru, ecrue, marron]
+      white: [blanc, blanche]
+      transparent: [transparent, transparente, incolore, cristal]
+      black: [noir, noire]
+      grey: [gris, grise]
+      blue: [bleu, bleue]
+      red: [rouge]
+      green: [vert, verte]
+      yellow: [jaune]
+  tape_material:
+    policy: review
+    types: [tape]           # only read on products of these types
+    values:
+      polypropylene: [polypropylene, "pp"]
+      pvc: [pvc]
+      paper: ["papier", "kraft", "bande gommee"]
+  application:
+    policy: review
+    types: [tape, stretch_film]
+    values:
+      manual: [manuel, manuelle, "a main"]
+      machine: ["pour machine", "rouleau machine", "film machine", automatique]
+
+# Automatic association also requires the dimensions to be comparable when either side has
+# dimensions (otherwise a box of unknown size could be auto-matched on its text alone).
+require_comparable_dimensions: true

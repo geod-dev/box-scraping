@@ -1,7 +1,8 @@
 # Competitor catalog API: guide for client/frontend developers
 
 This directory is everything needed to build a client (for example a web frontend to
-search products and manage the scraping workers) without reading the backend code:
+search products, manage the scraping workers and review the product matching) without
+reading the backend code:
 
 | File | Content |
 |---|---|
@@ -43,14 +44,18 @@ a test fails when the committed file is out of date.
   | 401 | `unauthorized` | missing/invalid API key |
   | 404 | `not_found` | unknown resource or route |
   | 409 | `worker_busy` | the competitor already has an active job (`details.job_id`) |
-  | 409 | `catalog_required` | price refresh refused: no full catalog sync yet |
+  | 409 | `catalog_required` | price refresh or matching refused: no full catalog sync yet (products not parsed) |
+  | 409 | `matching_reference` / `reference_catalog_required` / `reference_missing` / `matching_not_configured` | matching refused: the competitor is the reference (Antalis) / Antalis has no full catalog sync / Antalis not in database / no `VOYAGE_API_KEY` on the server |
   | 409 | `competitor_disabled` / `competitor_not_configured` | competitor cannot run jobs |
   | 409 | `worker_idle` | stop/pause/resume while the competitor has no active job |
-  | 409 | `job_not_active` / `job_not_running` / `job_not_paused` / `job_stopping` | invalid job transition |
+  | 409 | `job_not_active` / `job_not_running` / `job_not_paused` / `job_stopping` / `job_not_restartable` | invalid job transition |
+  | 409 | `nothing_to_retry` | retry-failed on a run without failed page |
   | 409 | `job_active` / `run_active` | cannot delete something still running |
-  | 409 | `conflict` | uniqueness violation (same product reference/URL, same category URL, same match) |
+  | 409 | `conflict` | uniqueness violation (same product reference/URL, same category URL) |
+  | 404 | `match_not_found` | the product has not been matched yet |
   | 422 | `validation_error` | invalid body/query (`details` = list of field errors) |
-  | 422 | `invalid_options`, `invalid_parent`, `invalid_category`, `invalid_product`, `invalid_match`, `invalid_filter` | semantic validation |
+  | 422 | `invalid_options`, `invalid_parent`, `invalid_category`, `invalid_product`, `invalid_filter` | semantic validation |
+  | 422 | `invalid_antalis_product`, `antalis_product_required` | matching decision: the chosen product is not an Antalis product / nothing proposed to validate |
   | 500 | `internal_error` | bug: see server logs |
   | 502/503 | `scrapedo_unavailable` / `scrapedo_not_configured` | `GET /scrapedo/account` only |
 
@@ -77,6 +82,7 @@ one **task**:
 |---|---|---|
 | `catalog_sync` | crawls every category/listing page, then every product page: creates/updates categories and products (details, characteristics, images) and records current prices; at the end of a complete full sync, products no longer listed are flagged `missing` | no active job |
 | `price_refresh` | visits the known product pages and records their current prices only (fast; no category crawl) | no active job **and** a full catalog sync was done (`last_full_catalog_at` set) |
+| `matching` | associates the competitor's products with Antalis products (see [Product matching](#product-matching)); no web page is fetched | not Antalis itself, no active job, a full catalog sync of the competitor **and** of Antalis, `VOYAGE_API_KEY` set on the server |
 
 Rules enforced by the server (also by the database):
 
@@ -120,14 +126,25 @@ The **worker state** (`GET /competitors/{key}/worker` → `state`) is what a UI 
 
 `tasks` tells which task can be started now and why not:
 `{"catalog_sync": {"allowed": true, "reason": null}, "price_refresh": {"allowed": false, "reason": "catalog_required"}}`
-(reasons: `worker_busy`, `catalog_required`, `competitor_disabled`).
+(reasons: `worker_busy`, `catalog_required`, `competitor_disabled`; for `matching` also
+`matching_reference`, `reference_catalog_required`, `reference_missing`,
+`matching_not_configured`).
 
 Notes:
 
 * A pause keeps everything in memory: it does not survive a server restart/redeploy (the
-  job then ends `interrupted`). Restarting a `catalog_sync` after an interruption is cheap:
-  by default products synced in the last 48 h are not fetched again
-  (`options.resume_within_hours`).
+  job then ends `interrupted`).
+* **After a redeploy, interrupted jobs restart by themselves**: the new worker queues a job
+  continuing each one (`requested_by: "auto_resume"`, `resumed_from_job_id` = the
+  interrupted job, notification `job_auto_resumed`), unless the server sets
+  `WORKER_AUTO_RESUME=false`. The work already done is skipped: a catalog sync replays the
+  category pages already fetched from the database (no request) and only fetches what is
+  left, so its progress bar moves fast through the part already done.
+* **Restart button**: `POST /jobs/{id}/restart` on an `interrupted`, `failed` or `cancelled`
+  job does the same on demand (409 `job_not_restartable` otherwise).
+* **Retry button** on a run with failed pages: `POST /runs/{id}/retry-failed` refetches only
+  the failed pages of that run (409 `nothing_to_retry` when there is none). For a catalog
+  run it also covers products that could not be created and failed category pages.
 * The crawl delay is imposed by the site (Antalis: 10 s between requests), so a full
   Antalis catalog sync takes several hours (~2 700 requests ≈ 7-8 h); a price refresh of
   ~2 200 products ≈ 6 h.
@@ -160,7 +177,8 @@ A job carries `step`, `step_label`, `step_done`, `step_goal` and a `progress` ob
 ```
 
 Steps per task: `catalog_sync` = `crawl_listings` → `sync_products` → `finalize`;
-`price_refresh` = `refresh_prices`. While crawling listings the number of listing pages is
+`price_refresh` = `refresh_prices`; `matching` = `detect_changes` → `embed` (texts sent to
+Voyage AI; the unit of work is one text) → `match` (one product scored) → `finalize`. While crawling listings the number of listing pages is
 not known yet: the total is estimated from the last full catalog sync (or the configured
 catalog size) and is at least `done + pending` (pages already discovered).
 
@@ -170,7 +188,7 @@ catalog size) and is at least `done + pending` (pages already discovered).
 `credits_used`, ...).
 
 **Before starting**, `POST /competitors/{key}/worker/estimate` (same body as start) returns
-`{requests, seconds, credits, listing_pages, products, seconds_per_request, basis[]}` where
+`{requests, seconds, credits, listing_pages, products, embeddings, seconds_per_request, basis[]}` where
 `basis` explains each figure in plain text. `GET /competitors/{key}` includes `estimates` for
 both tasks with default options. A job also keeps its initial `estimate`.
 
@@ -195,8 +213,10 @@ both tasks with default options. A job also keeps its initial `estimate`.
   outcome of every page (`succeeded`, `failed`, `not_found`, `no_price`, `skipped`) with
   `error_type`/`error_message`/`http_status`. `GET /run-items?status=failed` lists every
   scraping error.
-* **Product matches**: links between equivalent products of *different* competitors
-  (`proposed` → `validated`/`rejected`); for future price comparison.
+* **Matching**: each competitor product is associated with an Antalis product, see
+  [Product matching](#product-matching). `GET /products/{id}` has a `matching` summary for
+  a competitor product and `match_count` (competitor products associated with it) for an
+  Antalis product.
 
 All of them have list/get/create/update/delete endpoints (runs and run items: read and
 delete only; they are written by the worker). Deleting a product deletes its price history.
@@ -218,6 +238,10 @@ Saved in the database, read/unread. Created by the worker for every job event an
 | `job_crashed` | error | unexpected exception (`data.traceback`), followed by `job_failed` |
 | `error_burst` | error | 10 pages failed in a row (site blocking, proxy outage...) |
 | `page_errors` | error | digest of new page errors during a run, at most every 15 min (`data.errors`: url, status, error_type, message) |
+| `matching_summary` | warning / success | end of a matching run: `data.needs_review` = products waiting for a human review, `data.totals` per status, `data.run` counters (warning when something needs review or is deprecated) |
+| `job_auto_resumed` | info | an interrupted job was restarted automatically after a worker restart (`data.resumed_from_job_id`) |
+| `job_auto_resume_stopped` | error | not restarted automatically: interrupted 3 times in a row after automatic restarts (crash loop?) |
+| `matches_deprecated` | warning | matches became obsolete because a product changed (`data.count`, `data.by_reason`, `data.by_previous_status`, `data.matches[]`: match/product ids, title, previous status, reason) |
 
 Each notification: `id`, `created_at`, `level`, `kind`, `title`, `message`,
 `competitor_id`, `job_id`, `scrape_run_id`, `data`, `read_at`, `read`. Endpoints: list
@@ -265,6 +289,108 @@ every 15-30 s; mark read on display.
   (price applicable to a quantity). `GET /products/by-reference/antalis_fr/503623` finds a
   product by reference.
 
+## Product matching
+
+Antalis is the **reference catalog**. Every product of the other competitors gets **one
+match** (one row, whatever the number of reruns) linking it to the Antalis product that
+corresponds to it best. A match is addressed by its **competitor product id**
+(`/matching/products/{product_id}`).
+
+**Statuses** (`status`), what to show:
+
+| status | meaning | `antalis_product` | UI |
+|---|---|---|---|
+| `auto_matched` | associated automatically (score ≥ 90 and clearly ahead of the 2nd candidate) | set | "Automatic" badge; can still be validated/rejected |
+| `validated` | associated by a human (`manual_choice=true`: another product than the engine's proposal) | set | "Validated" badge, `decided_by`, `decided_at`, `decision_comment` |
+| `needs_review` | a proposal waits for a human (score 75-89, or ≥ 90 but ambiguous / conflicting) | null; see `proposed_antalis_product` | review queue |
+| `no_match` | no acceptable Antalis product (score < 75 or every candidate incompatible) | null; `proposed_antalis_product` = closest one, if any | "No equivalent" |
+| `rejected` | a human confirmed there is no equivalent; the rejected products are never proposed again | null | "Rejected" badge |
+| `deprecated` | the competitor or the Antalis product changed (or disappeared) since: rerun needed | **kept as it was**, `previous_status`, `deprecated_reason` | "Obsolete" badge |
+
+`score` is a similarity score 0-100, **not a probability**: show it as a score (e.g. a gauge),
+never as "93 % sure". `decision_reasons[]` (`code` + `message`) explains the status:
+`score_above_auto`, `clear_gap`, `single_candidate`, `ambiguous_gap`, `review_band`,
+`score_below_review`, `no_compatible_candidate`, `feature_conflict`,
+`dimensions_not_comparable`, `previously_validated`, `previous_association_changed`.
+`deprecated_reason`: `product_changed`, `antalis_product_changed`, `antalis_product_missing`,
+`antalis_product_deleted`, `reset_requested`. `outdated_config=true`: computed with an older
+configuration (the next run refreshes it).
+
+**Launching**
+
+* `GET /matching/summary` → one entry per competitor (Antalis excluded): `availability`
+  (`allowed`, `reason`, `message`: disable the button with the reason), `counts` per status,
+  `eligible_products`, `never_matched`, `needs_review`, `deprecated`, `embedding_tokens`,
+  the active `job` and `last_job`.
+* `POST /matching/competitors/{key}/run` with `{"mode": "incremental"}` (default: only what
+  changed: new products, deprecated matches, results computed with another config or
+  Antalis catalog state), `"deprecated"` (only the obsolete ones) or `"all"` (every engine
+  result) → `202` + a job, followed like any job (`GET /jobs/{id}` or
+  `GET /competitors/{key}/worker`; `task: "matching"`). Human decisions are never
+  recomputed unless deprecated. The first run embeds the whole Antalis catalog and the
+  competitor's products: with the current Voyage plan (no payment method: 10K tokens/min)
+  allow ~25 min for Antalis and ~1 h per 6 000 products, once; reruns only embed changed
+  texts and take seconds. `job.estimate` / `POST .../worker/estimate` give the figures.
+* `POST /matching/deprecated/rerun` (`{}` or `{"competitor": "packdiscount_fr"}`) → one
+  `mode=deprecated` job per competitor having deprecated matches:
+  `{"jobs": [...], "refused": [{competitor_key, code, message}], "nothing_to_do": [...]}`.
+
+**Lists** (paginated, `limit`/`offset`):
+
+* `GET /matching/matches` – everything. Filters: `competitor`, `status` (repeatable), `q`
+  (words in the competitor product title/reference/brand), `antalis_q` (words in the
+  associated or proposed Antalis product), `antalis_product_id` (all competitor products
+  associated with / proposed for one Antalis product: price comparison), `min_score`,
+  `max_score`, `decided` (human decision), `manual_choice`, `reason` (decision reason code,
+  repeatable), `deprecated_reason`, `dimensions_compared`, `product_status`. Sort: `score`,
+  `score_gap`, `updated_at` (default), `computed_at`, `decided_at`, `deprecated_at`,
+  `title`, `id`; `order=asc|desc`.
+* `GET /matching/review` – the review queue (`needs_review`, best scores first; same filters).
+* `GET /matching/deprecated` – obsolete matches (newest first; `deprecated_reason` filter).
+* `GET /matching/history` – every event (`computed`, `recomputed`, `validated`, `rejected`,
+  `deprecated`, `reset`) with `data` = snapshot of the previous state; filters
+  `competitor`, `product_id`, `event`, `job_id`, `actor`.
+
+Each list item: `id`, `status`, `product` / `antalis_product` / `proposed_antalis_product`
+(`{id, competitor_key, catalog_reference, title, url, brand, category, status,
+normalized_attributes}`), `score`, `runner_up_score`, `score_gap`, `dimensions_compared`,
+`decision_reasons`, decision and deprecation fields, `computed_at`, `job_id`, `revision`.
+
+**Review screen** – `GET /matching/products/{product_id}` = the list item plus:
+
+* `analysis`: what the engine read of the competitor product (`title`, `description_used`,
+  `category`, `dimensions` with value/unit/source, `product_type`, `features`);
+* `candidates[]` (ranked, then the best excluded ones with `rank: null`): `antalis_product`,
+  `score`, `semantic_score` / `lexical_score` / `dimension_score` (0..1, null = not
+  comparable), `weights` applied, `semantic.cosine`, `lexical.shared_terms`,
+  `dimensions.measures[]` (`label`, `competitor`, `reference`, `unit`,
+  `relative_difference`, `score`), `features[]` (`product_type`, colour, flute...:
+  `match`/`conflict`/`unknown`), `differences[]`, `exclusions[]` (why it can never be
+  associated), `review_flags[]` (why it cannot be automatic), `retrieved_by`, `is_proposed`,
+  `is_associated`, `rejected_by_human`;
+* `rejected_antalis_products`, `history[]` (newest first).
+
+A good layout: the competitor product on the left, the candidates as rows with the final
+score, the three sub-scores and their weights, the compared measures side by side
+(highlight `differences`), and the exclusions/flags as warnings.
+
+**Decisions** (each returns the updated detail; `decided_by` is free text for the history):
+
+* `POST /matching/products/{id}/validate` `{}` → confirms the proposal;
+  `{"antalis_product_id": 123, "decided_by": "alice", "comment": "..."}` → associates
+  another Antalis product (search it with `GET /products?competitor=antalis_fr&q=...`;
+  check it first with `GET /matching/products/{id}/compare/{antalis_product_id}`, same
+  candidate structure, `semantic_available=false` when an embedding is missing).
+* `POST /matching/products/{id}/reject` `{"comment": "..."}` → `rejected` (no equivalent);
+  the proposal is remembered and never proposed again.
+* `POST /matching/products/{id}/reset` `{"clear_rejections": false}` → back to the engine
+  (`deprecated` / `reset_requested`, recomputed by the next run).
+
+A validated/rejected match stays as decided across reruns until the competitor product or
+the associated Antalis product changes: it then becomes `deprecated` (former association
+kept, `matches_deprecated` notification). Obsolescence is detected after every catalog sync
+/ price refresh, at the start of every matching run and after a product edit through the API.
+
 ## Endpoint index
 
 All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
@@ -285,6 +411,7 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | GET | `/jobs` | job history (`competitor`, `task`, `status`, `active`) |
 | GET | `/jobs/{id}` | one job |
 | POST | `/jobs/{id}/cancel`, `/jobs/{id}/pause`, `/jobs/{id}/resume` | same actions by job id |
+| POST | `/jobs/{id}/restart` | restart an interrupted/failed/cancelled job, skipping the work done |
 | DELETE | `/jobs/{id}` | delete a finished job |
 | GET/POST | `/categories` | list/search (`competitor`, `parent_id`, `roots`, `status`, `kind`, `q`) / create |
 | GET | `/categories/tree` | nested tree (`competitor` required) |
@@ -301,9 +428,21 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | GET | `/runs` | runs (`competitor`, `operation`, `status`, `full_scope`) |
 | GET/DELETE | `/runs/{id}` | run detail with `item_counts` and `stats` / delete |
 | GET | `/runs/{id}/items` | page outcomes of a run (`status`, `item_type`) |
+| POST | `/runs/{id}/retry-failed` | queue a job refetching only the failed pages of the run |
 | GET | `/run-items` | page outcomes across runs (`competitor`, `status`, `item_type`, `product_id`, `url`) |
-| GET/POST | `/product-matches` | list (`product_id`, `status`) / create |
-| GET/PATCH/DELETE | `/product-matches/{id}` | one match |
+| GET | `/matching/config` | thresholds, weights, model, whole matching config, `configured` |
+| GET | `/matching/summary` | matching state per competitor (`competitor`) |
+| POST | `/matching/competitors/{key}/run` | start a matching job (`{"mode"}`) |
+| POST | `/matching/deprecated/rerun` | recompute the deprecated matches (`{"competitor"}` optional) |
+| GET | `/matching/matches` | all matches (filters, sort) |
+| GET | `/matching/review` | review queue (`needs_review`) |
+| GET | `/matching/deprecated` | obsolete matches |
+| GET | `/matching/history` | events of all matches |
+| GET | `/matching/products/{product_id}` | one match: analysis, candidates with score breakdown, history |
+| GET | `/matching/products/{product_id}/compare/{antalis_product_id}` | score breakdown against any Antalis product |
+| POST | `/matching/products/{product_id}/validate` | validate the proposal / associate another product |
+| POST | `/matching/products/{product_id}/reject` | no equivalent |
+| POST | `/matching/products/{product_id}/reset` | recompute by the engine |
 | GET | `/notifications` | list (`unread`, `level`, `kind`, `competitor`, `job_id`, `since_id`) |
 | GET | `/notifications/unread-count` | unread badge |
 | POST | `/notifications/read-all` | mark all (filtered) as read |
@@ -321,6 +460,7 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | `max_listing_pages` / `max_products` | none | stop after N pages/products (partial scope, for tests) |
 | `skip_products` | false | only crawl categories and product links |
 | `allow_mass_missing` / `max_missing_ratio` | false / 0.2 | safety threshold for flagging products missing |
+| `retry_failed_run_id` | none | only the pages that failed in that catalog run (partial scope); `POST /runs/{id}/retry-failed` sets it for you |
 
 A catalog sync with partial-scope options never updates `last_full_catalog_at` and never
 flags anything missing.
@@ -336,3 +476,6 @@ flags anything missing.
 | `include_missing` | also refresh products flagged missing |
 | `update_details` | also update descriptions/characteristics/images |
 | `limit` | at most N products |
+
+`matching`: `mode` = `incremental` (default) | `deprecated` | `all` (see
+[Product matching](#product-matching)).

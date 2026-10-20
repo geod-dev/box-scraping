@@ -264,10 +264,6 @@ class AntalisAdapter(CompetitorAdapter):
             url=url,
             catalog_reference=reference,
             external_id=reference,
-            # Antalis' own catalog reference *is* the Antalis reference.
-            antalis_reference=reference
-            if self.config.options.get("catalog_reference_is_antalis_reference", True)
-            else None,
             title=title,
             description=description,
             long_description=long_description,

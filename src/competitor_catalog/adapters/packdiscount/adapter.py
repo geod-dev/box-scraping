@@ -16,6 +16,7 @@ no JavaScript rendering). Model of the catalog, verified on saved responses:
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -231,9 +232,7 @@ class PackdiscountAdapter(CompetitorAdapter):
             external_id=sku,
             ancestors=[self._root_ref(), *chain],
         )
-        return ListingPage(
-            url=page.final_url, category=category, next_page_url=next_page, warnings=warnings
-        )
+        return ListingPage(url=page.final_url, category=category, next_page_url=next_page, warnings=warnings)
 
     def _variations(self, page: FetchedPage, data: dict[str, Any]) -> ListingPage:
         elements = data.get("elements") or []
@@ -280,12 +279,18 @@ class PackdiscountAdapter(CompetitorAdapter):
         sale = data.get("salePrice") or {}
         if sale.get("value") is None:
             return PriceSnapshot(tiers=[], price_found=False, reason="no price shown")
+        currency = sale.get("currency") or sale.get("currencyMnemonic") or "EUR"
+        if not re.fullmatch(r"[A-Za-z]{3}", currency):
+            # Intershop shows a product without price as {"value": 0.0, "currency": "N/A"}.
+            return PriceSnapshot(
+                tiers=[], price_found=False, reason=f"no price shown (placeholder price, currency {currency!r})"
+            )
         list_price = (data.get("listPrice") or {}).get("value")
         unit = clean_text(data.get("packingUnit")) or "unit"
         min_qty = data.get("minOrderQuantity")
         tier = PriceTier(
             price=Decimal(str(sale["value"])),
-            currency=sale.get("currency") or sale.get("currencyMnemonic") or "EUR",
+            currency=currency,
             price_basis=PriceBasis.UNIT,
             # The API does not say whether prices include VAT: kept unknown until verified.
             tax_mode=TaxMode.UNKNOWN,

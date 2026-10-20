@@ -17,6 +17,11 @@ On the server they run as **worker jobs** driven by an **HTTP API** (`catalog-sc
 and ETA, CRUD on the scraped data, persisted notifications. Nothing scrapes unless a job
 is requested. API guide for client/frontend developers: [`docs/api/`](docs/api/README.md).
 
+A third job, **product matching** (§5), associates every product of the other competitors
+with the corresponding **Antalis** product (the reference catalog): Voyage AI embeddings +
+lexical search + dimension comparison, automatic association when unambiguous, human review
+otherwise, incremental reruns and obsolescence tracking when products change.
+
 Site findings (what is confirmed vs assumed) are in
 [`docs/antalis-observations.md`](docs/antalis-observations.md) and
 [`docs/packdiscount-observations.md`](docs/packdiscount-observations.md).
@@ -50,6 +55,8 @@ uv run catalog-scraper price-refresh --competitor antalis_fr
 | variable | required | meaning |
 |---|---|---|
 | `SCRAPEDO_API_KEY` | yes (network commands) | Scrape.do token. Read from the environment only, never logged (see §6). |
+| `VOYAGE_API_KEY` | matching | Voyage AI key (embeddings). Without it matching is disabled (`matching_not_configured`). Never logged. |
+| `MATCHING_CONFIG` | no | defaults to `config/matching.yaml` (weights, thresholds, taxonomy, Voyage rate limits) |
 | `DATABASE_URL` | yes | SQLAlchemy URL, e.g. `postgresql+psycopg://scraper:scraper@localhost:5433/competitor_catalog` |
 | `TEST_DATABASE_URL` | tests | database whose schema the tests drop/recreate (default: `competitor_catalog_test` on the compose server) |
 | `LOG_LEVEL` | no | `INFO` by default |
@@ -59,6 +66,7 @@ uv run catalog-scraper price-refresh --competitor antalis_fr
 | `CORS_ORIGINS`, `API_HOST`, `API_PORT` | no | API: allowed origins (default `*`), bind address (`0.0.0.0:8000`) |
 | `AUTO_SCHEDULE` | no | worker: `true` = also enqueue due jobs automatically (default `false`: only API requests) |
 | `WORKER_MAX_CONCURRENT_JOBS`, `WORKER_POLL_SECONDS`, `STALE_JOB_MINUTES` | no | worker tuning (4, 3, 30) |
+| `WORKER_AUTO_RESUME` | no | worker: restart the jobs interrupted by a worker restart/redeploy at start-up (default `true`) |
 
 `.env` is loaded automatically (real environment variables take precedence) and is
 git-ignored; `.env.example` documents the variables without values.
@@ -154,10 +162,11 @@ Exit code: `0` = run succeeded, `2` = run partial/failed (details in `scrape_run
 uv run catalog-scraper api       # migrations, then the HTTP API on :8000 (docs: /api/v1/docs)
 uv run catalog-scraper worker    # migrations, then executes the jobs requested through the API
 uv run catalog-scraper export-openapi   # regenerate docs/api/openapi.json after an API change
+uv run catalog-scraper match --competitor packdiscount_fr [--mode incremental|deprecated|all]
 ```
 
-* A **job** = one task (`catalog_sync` = operation A, `price_refresh` = operation B) for one
-  competitor. The database guarantees **at most one active job per competitor** (partial
+* A **job** = one task (`catalog_sync` = operation A, `price_refresh` = operation B,
+  `matching` = §5) for one competitor. The database guarantees **at most one active job per competitor** (partial
   unique index on `worker_jobs`); a price refresh is refused until a full catalog sync
   finished (`competitors.last_full_catalog_at`).
 * The worker process claims queued jobs (`SKIP LOCKED`), runs each in its own thread with
@@ -169,7 +178,25 @@ uv run catalog-scraper export-openapi   # regenerate docs/api/openapi.json after
   durations of previous runs (crawl delay + overhead otherwise).
 * Notifications (`notifications` table) are written for each job event and for errors
   (bursts of failures, periodic digests of page errors, crashes).
-* CLI operations (`catalog-sync`, `price-refresh`) still work directly; they do not go
+* **Retrying failed pages**: `POST /runs/{id}/retry-failed` queues a job that refetches only
+  the pages that failed in that run — for a catalog run, a `catalog_sync` with
+  `retry_failed_run_id` (its failed product pages, including products never created, and
+  its failed listing pages with their sub-pages; never a full sync, never flags anything
+  missing); for a price refresh run, a `price_refresh` with `retry_failed_run_id`.
+* **Restarting a stopped job**: `POST /jobs/{id}/restart` (interrupted, failed or cancelled
+  job) queues the same task, linked by `resumed_from_job_id`, skipping the work already
+  done: products synced (catalog sync, `resume_within_hours`) or priced (price refresh,
+  `skip_fresh_hours`) since the stopped job started; matching is incremental anyway. The
+  category pages a catalog sync already fetched are **replayed from the database** (table
+  `listing_page_cache`, compressed, kept until a full sync completes, purged after 7 days):
+  no request, no credit, and the crawl, completeness checks and missing-flagging work as
+  for a fresh crawl. Only the remaining category pages and products are fetched.
+* **Automatic resume after a redeploy**: at start-up the worker restarts every job
+  interrupted (by its own shutdown or a dead worker) in the last 24 h when nothing else was
+  started on that competitor since (`requested_by: "auto_resume"`, notification
+  `job_auto_resumed`). After 3 automatic restarts in a row of the same work it stops and
+  notifies `job_auto_resume_stopped` (crash-loop guard). `WORKER_AUTO_RESUME=false` disables it.
+* CLI operations (`catalog-sync`, `price-refresh`, `match`) still work directly; they do not go
   through the job queue, so do not run one on a competitor whose worker is busy.
 
 ---
@@ -190,10 +217,14 @@ src/competitor_catalog/
   services/        orchestration: catalog_sync.py (A), price_refresh.py (B), runs.py (tracking,
                    progress/stop hooks), jobs.py (job rules, execution, progress), dispatcher.py
                    (worker process), estimates.py, notifications.py, worker.py (opt-in schedule)
+  matching/        product matching (§5): config.py, text.py (fields read, hashes), dimensions.py,
+                   features.py (types/characteristics), lexical.py, embeddings.py (Voyage + cache),
+                   engine.py (pure scoring/decision), service.py (runs, change detection, decisions)
   api/             FastAPI app: main.py (factory, errors, auth), schemas.py, views.py, routes/
   app.py, cli.py   wiring and command line
 docs/api/                            API guide + openapi.json for client developers
 config/competitors/antalis_fr.yaml   competitor configuration (data, no code)
+config/matching.yaml                 matching: reference catalog, weights, thresholds, taxonomy
 migrations/                          Alembic migrations
 tests/                               fixtures + unit, DB and live tests
 ```
@@ -238,7 +269,8 @@ explicit classes and everything reusable lives in `core/`.
 
 ## 4. Database model
 
-Tables (see `src/competitor_catalog/db/models.py` and `migrations/versions/0001_initial_schema.py`):
+Tables (see `src/competitor_catalog/db/models.py` and `migrations/versions/`; a test checks
+that the migrations build exactly the models):
 
 ### `competitors`
 `id`, `key` (unique, = config key), `name`, `base_url`, `adapter` (import path),
@@ -263,7 +295,7 @@ Uniqueness: `UNIQUE(competitor_id, url)` and a partial unique index on
 
 ### `products` (one reference in one competitor catalog)
 `id`, `competitor_id`, `category_id` (most specific known category = Antalis product
-family), `catalog_reference` (reference in its own catalog), `antalis_reference`,
+family), `catalog_reference` (reference in its own catalog),
 `external_id`, `url` (exact canonical product detail URL, independent from category URLs),
 `title`, `description`, `attributes`, `images`, timestamps and lifecycle (`status`,
 `first_seen_at`, `last_seen_at`, `last_seen_run_id`, `missing_since`). Added fields:
@@ -358,24 +390,134 @@ SELECT r.id, i.status, i.error_type, i.error_message FROM scrape_run_items i
 JOIN scrape_runs r ON r.id = i.scrape_run_id WHERE i.product_id = 42 ORDER BY i.id DESC LIMIT 1;
 ```
 
-### Product equivalence (`product_matches`, created, not populated yet)
-Minimal model for later cross-competitor matching: `product_a_id < product_b_id` (ordered
-pair, unique), `match_type` (`equivalent`, `similar`, `substitute`...), `confidence` 0..1,
-`status` (`proposed`, `validated`, `rejected`), `method` (`manual`, `antalis_reference`,
-`attribute_rule`...), `evidence` (JSONB), `validated_by`, `validated_at`.
-Product rows are **never merged**: each competitor keeps its own record; a match only links them.
+### Product matching (§5)
+Product rows are **never merged**: each competitor keeps its own record; a match links a
+competitor product to an Antalis product.
 
-`antalis_reference` vs matching: `antalis_reference` is a *per-product attribute* — the
-Antalis catalog reference a product corresponds to (its own reference for Antalis
-products; for another competitor, a reference printed on its page or entered by a buyer).
-It is raw information, possibly unverified, and only points to Antalis. `product_matches`
-is a *relation* between any two product rows (any competitors), with confidence and a
-human validation workflow. A matching job can use `antalis_reference` as evidence to
-*propose* a match.
+* `product_matches` – the **current** state, **exactly one row per competitor product**
+  (`UNIQUE(product_id)`: reruns update it, they cannot duplicate it). `status`
+  (`auto_matched`, `validated`, `needs_review`, `no_match`, `rejected`, `deprecated`),
+  `antalis_product_id` (the association: set for `auto_matched`/`validated`),
+  `proposed_antalis_product_id` (the engine's best candidate), `score` / `runner_up_score` /
+  `score_gap` (0-100, not a probability), `dimensions_compared`, `decision_reasons` (JSONB
+  codes + messages); change detection: `product_hash`, `antalis_product_hash`,
+  `reference_catalog_hash`, `config_hash`, `computed_at`, `job_id`; human decision:
+  `decided_by`, `decided_at`, `decision_comment`, `manual_choice` (another product than the
+  proposal), `rejected_antalis_product_ids` (never proposed again); obsolescence:
+  `deprecated_at`, `deprecated_reason`, `previous_status` (the association stays in place,
+  visible); `revision` (optimistic lock: a run never overwrites a decision taken meanwhile).
+* `product_match_candidates` – the ranked candidates of the latest computation (10 best +
+  5 best excluded) with `score`, `semantic_score`, `lexical_score`, `dimension_score` and
+  `details` (JSONB: weights, raw cosines, shared terms, compared measures and
+  characteristics, differences, exclusions, review flags, retrieval signals).
+* `product_match_events` – **append-only history**: `computed`, `recomputed` (only when the
+  result changed or after a deprecation), `validated`, `rejected`, `deprecated`, `reset`,
+  with from/to status and product, score, actor (`engine` or the reviewer), reason and a
+  JSONB snapshot of the previous state (top candidates included). Product ids are plain
+  columns so the history survives the deletion of an Antalis product.
+* `product_embeddings` – one cached embedding per product (`text_hash` of model + dimensions
+  + text, `tokens` billed, float32 vector), reused while the text is unchanged.
+
+```sql
+-- competitor prices next to the Antalis product they are associated with
+SELECT a.catalog_reference AS antalis_ref, a.title, c.key, p.catalog_reference, p.title, m.status, m.score
+FROM product_matches m JOIN products p ON p.id = m.product_id JOIN competitors c ON c.id = m.competitor_id
+JOIN products a ON a.id = m.antalis_product_id
+WHERE m.status IN ('auto_matched', 'validated') ORDER BY a.catalog_reference;
+-- evaluation: engine score vs human decisions (to tune the thresholds)
+SELECT e.event, width_bucket(e.score, 50, 100, 10) AS bucket, count(*) FROM product_match_events e
+WHERE e.event IN ('validated', 'rejected') GROUP BY 1, 2 ORDER BY 2, 1;
+```
 
 ---
 
-## 5. Scrape.do integration
+## 5. Product matching
+
+Antalis (`reference_competitor` in `config/matching.yaml`) is the **reference catalog**: every
+product of the *other* competitors is associated with the Antalis product that corresponds
+to it best. Antalis products are never matched themselves.
+
+**Prerequisites** (otherwise the job is refused with the code in brackets): a successful full
+catalog sync of the competitor (`catalog_required`) and of Antalis
+(`reference_catalog_required`), i.e. both catalogs parsed; `VOYAGE_API_KEY` set
+(`matching_not_configured`). Only active products whose details were parsed are matched.
+
+**Running** – a worker job `matching` (`POST /api/v1/matching/competitors/{key}/run`, or the
+generic worker endpoints), followed like any job; or `catalog-scraper match`. Modes:
+
+| mode | products (re)computed |
+|---|---|
+| `incremental` (default) | never matched + `deprecated` + engine results computed with another config or another state of the Antalis catalog |
+| `deprecated` | `deprecated` only (`POST /api/v1/matching/deprecated/rerun` does it for every competitor) |
+| `all` | every engine result (after a threshold change, to re-check everything) |
+
+Human decisions (`validated`, `rejected`) are **never recomputed** unless they became
+`deprecated`. At the end of a run, a `matching_summary` notification gives the number of
+products needing a human review.
+
+**Engine** (`matching/engine.py`, pure; `text.py`, `dimensions.py`, `features.py`, `lexical.py`):
+
+1. *What is read*: the title + the description (embedded together as asked) + the category
+   name (which carries the product family when the description is empty, as for
+   Packdiscount variants whose placeholder description "➤ Voir toutes les références" is
+   ignored through `matching.ignore_description_patterns` of the competitor YAML; the long
+   description is used instead when present), and the normalized attributes.
+2. *Signals*: **semantic** = cosine of `voyage-4` embeddings (1024 dims, rescaled from
+   `[0.55, 0.95]` to 0..1: unrelated packaging products are ~0.5, two descriptions of the
+   same product ~0.92-0.97); **lexical** = TF-IDF cosine of the words (numbers excluded,
+   IDF learnt on the Antalis catalog, rescaled with ceiling 0.6); **dimensions** = measures
+   with an explicit unit, from the normalized attributes first, else the title
+   (`L x l x h` box, roll width x length, flat format, thickness µm, grammage, volume):
+   1 within 2 % relative difference, 0 beyond 20 %, worst side of a box counts, the pair
+   scores `(mean + min) / 2` of the shared measures. Only reliable measures are kept (units
+   explicit), and two products are *comparable* when they share at least one measure.
+3. *Retrieval*: the union of the 25 best candidates by embedding, 25 by lexical similarity
+   and 15 by dimensions is re-ranked (a candidate missed by one signal is caught by another).
+4. *Exclusions* (certain incompatibilities, never associated): product types known on both
+   sides and not compatible (`product_types` + `compatible_types` of the config: a box is
+   never a tape, a tape dispenser is not a tape...), `exclude` characteristics in conflict
+   (single vs double flute), products rejected by a reviewer for this product.
+5. *Score* = `100 x Σ weight x sub-score`, weights `semantic 0.50 / lexical 0.20 /
+   dimensions 0.30` when the dimensions are comparable, else `0.75 / 0.25`.
+6. *Decision*: **auto_matched** when the best score is ≥ 90, at least 8 points ahead of the
+   second candidate, with no review flag (a `review` characteristic in conflict such as the
+   colour, or dimensions known on one side only / not comparable); **needs_review** from 75
+   (or ≥ 90 but ambiguous/flagged); **no_match** below 75. Each decision stores its reasons.
+
+Calibration note: on real products voyage-4 separates product *families* well but barely
+separates two *sizes* of the same product (0.96 vs 0.93): the dimensions and the gap rule
+are what distinguish "equivalent" from "similar". The score is a similarity score, **not a
+probability**; all thresholds and weights are starting points in `config/matching.yaml`,
+to tune with the validated/rejected decisions (query above).
+
+**Changes and reruns**:
+
+* `product_hash` (raw title, descriptions, category name, normalized attributes) is stored on
+  each match for the competitor product and for its Antalis product. A match becomes
+  **`deprecated`** when one of them changed, or its Antalis product went `missing` or was
+  deleted, with `previous_status`, the former association and a `deprecated` history event
+  kept, and a `matches_deprecated` **notification** (one per competitor and detection).
+  Detection runs at the end of every catalog sync / price refresh job (for the synced
+  competitor's matches, or for every competitor when Antalis was synced), at the start of
+  every matching run, and after a product update/deletion through the API.
+* Embeddings are reused while the embedded text is unchanged (`product_embeddings.text_hash`);
+  identical texts are embedded once; each batch is committed (an interrupted run keeps them).
+* A change of `config/matching.yaml` (or of the competitor's `matching` options, or
+  `ENGINE_VERSION`) changes `config_hash`: the next incremental run recomputes the engine
+  results, without deprecating anything.
+* `POST /api/v1/matching/products/{id}/reset` sends a match back to the engine.
+
+**Voyage AI quota**: the account currently has no payment method: Voyage then allows
+**3 requests / 10K tokens per minute** (the free tokens are not affected). The embedder paces
+its requests to these limits (`embedding.requests_per_minute` / `tokens_per_minute` in the
+config): ~100 tokens per product, i.e. **about 25 min for the Antalis catalog and ~1 h for
+6000 new products**, once; reruns only embed changed texts. Adding a payment method on
+dashboard.voyageai.com (the 200M free tokens stay free) raises the limits to 2000 RPM / 8M
+TPM: then set those values in the config.
+
+---
+
+## 6. Scrape.do integration
 
 * Request format (from the official docs): `GET https://api.scrape.do/?token=…&url=<encoded>`
   plus `timeout` (ms), optional `render=true`, `super=true`, `geoCode=fr`.
@@ -419,16 +561,31 @@ image, three services:
   `CATALOG_SYNC_INTERVAL_DAYS` and a price refresh every `PRICE_REFRESH_INTERVAL_HOURS`).
   Both services apply migrations at start-up (serialized by a PostgreSQL advisory lock).
 
-Coolify environment variables: `SCRAPEDO_API_KEY` and `API_KEY` (secrets), optional
-`CORS_ORIGINS`, `AUTO_SCHEDULE`, `WORKER_MAX_CONCURRENT_JOBS`, `LOG_LEVEL`.
+Coolify environment variables: `SCRAPEDO_API_KEY`, `API_KEY` and `VOYAGE_API_KEY` (secrets;
+without the Voyage key matching is disabled), optional `CORS_ORIGINS`, `AUTO_SCHEDULE`,
+`WORKER_AUTO_RESUME`, `WORKER_MAX_CONCURRENT_JOBS`, `LOG_LEVEL`.
 
 **Redeploying / restarting** the worker: on SIGTERM, running (or paused) jobs stop after the
 current page and end `interrupted` (90 s grace period); a job killed without notice is
-closed the same way when the worker starts again. Nothing restarts by itself: start the
-job again from the API. A new catalog sync does not refetch products synced in the last
-48 h (`resume_within_hours`): it re-walks the category tree (~1.5 h for Antalis) and
-continues with the remaining products. Data already written is kept (one transaction per
-page/product).
+closed the same way when the worker starts again. The new worker then **restarts the
+interrupted jobs by itself** (§2, `WORKER_AUTO_RESUME`): a catalog sync replays the category
+pages already fetched (no request) and fetches only the remaining pages and products. Data
+already written is kept (one transaction per page/product).
+
+**Database migrations at deploy**: both services run `catalog-scraper db-upgrade` (`alembic
+upgrade head`) when they start, serialized by a PostgreSQL advisory lock (`db/migrate.py`):
+the first applies the new migrations in one transaction (a failure rolls everything back and
+the container does not start), the second finds the schema up to date.
+
+During a deploy the **previous worker keeps running** for a moment (it finishes its current
+page, 90 s grace) while the new release migrates. Hence the rule for every migration:
+**stay compatible with the previous release** (expand/contract) — add tables/columns
+first; stop using a column in one release and drop it in a later one (e.g.
+`products.antalis_reference`, unused since 0005, still present until a later migration
+drops it). In addition, a worker that sees a schema migrated by a newer release
+(`alembic_version` unknown to its code) starts no new job (`schema_outdated` in its
+heartbeat) and only finishes the running ones. Take a `pg_dump` before deploying a
+migration that drops columns or tables.
 
 **Access**: the API is the management surface (and the frontend's backend); everything but
 `GET /api/v1/health` needs the API key. PostgreSQL stays on the compose network only; for
@@ -437,7 +594,7 @@ Coolify (`catalog-scraper runs`, `... prices --competitor antalis_fr --product 5
 
 ---
 
-## 6. Tests
+## 7. Tests
 
 ```bash
 uv run pytest                    # unit + parser tests + DB tests (DB tests skip if no TEST_DATABASE_URL server)
@@ -451,19 +608,35 @@ uv run ruff check src tests
 * `tests/test_engine_db.py` – generic engine on PostgreSQL with the toy competitor:
   hierarchy without duplicates, idempotent re-runs adding new products, partial runs never
   flagging missing products, mass-missing safety net, price refresh independence,
-  retry of failed products, identity mismatch, no-price vs failure, quantity queries,
+  retry of failed products and of failed catalog pages, resume replaying cached listing
+  pages, identity mismatch, no-price vs failure, quantity queries,
   plus an Antalis end-to-end sync of family HQ02953 on fixtures.
 * `tests/test_scrapedo_client.py` – request format, retries, fatal errors, token redaction.
 * `tests/test_jobs_db.py` – worker jobs: one job per competitor (service and database),
   price refresh only after a full catalog, dispatcher end to end, progress, cancel, pause /
-  resume, shutdown/restart interruption, failure guard, notifications, opt-in schedule.
+  resume, shutdown/restart interruption, automatic resume after a redeploy (work done
+  skipped, crash-loop guard), restart, old worker idle once a newer release migrated,
+  failure guard, notifications, opt-in schedule.
 * `tests/test_api.py` – the HTTP API: auth, worker lifecycle and refusals, product search,
   facets, CRUD, notifications read/unread, error format, `openapi.json` up to date.
+* `tests/test_matching_engine.py` – matching without database: config validation, text and
+  hashes, dimension parsing/scoring, product types and characteristics, TF-IDF, decisions
+  on a sample catalog (auto / review / no match, exclusions, conflicts), Voyage client
+  (payload, retries, key redaction), rate limiter, batching.
+* `tests/test_matching_db.py` – matching on PostgreSQL with a deterministic fake embedder:
+  prerequisites, first run, reruns reusing embeddings and recomputing nothing, deprecation
+  (product changed, Antalis product changed / missing / deleted) with notifications and
+  history, human decisions kept across reruns, rejected candidates never proposed again,
+  decision taken during a run not overwritten, estimates, detection after a sync job.
+* `tests/test_matching_api.py` – matching through the API and the worker: run, review queue,
+  score breakdown, compare, validate/reject/reset, list filters and pagination, deprecated
+  list and rerun, refusals.
+* `tests/test_schema_db.py` – the migrations build exactly the SQLAlchemy models.
 * `tests/test_live_scrapedo.py` – opt-in live checks.
 
 ---
 
-## 7. Limitations / open points
+## 8. Limitations / open points
 
 See `docs/antalis-observations.md` for details.
 
@@ -483,7 +656,15 @@ See `docs/antalis-observations.md` for details.
   palette` 1280 vs palette sales unit 540 for SKU 503623).
 * The crawl is sequential by design (crawl delay). A full sync of the packaging sector
   takes hours (~7-8 h for Antalis): start it as a worker job.
-* A paused job is held in memory: a worker restart ends it `interrupted`. Pauses have no
-  time limit.
+* A paused job is held in memory: a worker restart ends it `interrupted` (and the automatic
+  resume restarts it running, not paused). Pauses have no time limit.
+* Resuming a catalog sync replays the category pages cached within `resume_within_hours`
+  (48 h by default; automatic resumes cover the whole interrupted job): an older
+  interruption crawls them again.
 * The API has a single shared key (no users/roles).
-* Product matching logic is not implemented (schema only).
+* Product matching: thresholds and weights are initial values, calibrated on a small sample
+  only; tune them with the human decisions. The keyword taxonomy (`product_types`,
+  `features`) covers packaging; extend it when a competitor sells other families. Vector
+  search is done in memory (numpy): fine for tens of thousands of reference products; for
+  much bigger catalogs, move the vectors to pgvector. Products of a competitor whose
+  details are not parsed (no full catalog sync yet) cannot be matched.

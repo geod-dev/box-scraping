@@ -32,7 +32,6 @@ scrapedo:
 options:
   # pageDataModel.category_type_id placeholder used by sector pages (not a real id).
   ignored_category_external_ids: [HQ00000]
-  catalog_reference_is_antalis_reference: true
   # Some products (machines...) show no price, only "Demander à être rappelé", while their
   # JSON-LD offer carries a price. true = record it as an observation flagged
   # displayed=false with unknown basis/tax; false = record "no_price".

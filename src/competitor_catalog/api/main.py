@@ -19,17 +19,18 @@ from competitor_catalog.api.routes import (
     categories,
     competitors,
     jobs,
-    matches,
     notifications,
     observations,
     products,
     runs,
     system,
 )
-from competitor_catalog.app import session_factory
+from competitor_catalog.api.routes import matching as matching_routes
+from competitor_catalog.app import build_matching_runtime, session_factory
 from competitor_catalog.core.config import load_competitor_configs
 from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.session import transaction
+from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.settings import Settings, SettingsError
 
 log = logging.getLogger(__name__)
@@ -37,7 +38,8 @@ log = logging.getLogger(__name__)
 API_PREFIX = "/api/v1"
 DESCRIPTION = """
 Competitor catalog scraper API: competitors and their worker (catalog sync / price
-refresh), scraped categories, products and price history, runs, notifications.
+refresh / product matching), scraped categories, products and price history, runs,
+matching of competitor products with the reference catalog (Antalis), notifications.
 
 Authentication: send the API key in the `X-API-Key` header (or `Authorization: Bearer`).
 Errors: `{"error": {"code", "message", "details"}}`. Full guide: `docs/api/` in the repository.
@@ -55,6 +57,7 @@ def create_app(
     api_key: str | None = None,
     auth_disabled: bool | None = None,
     sync_competitors: bool = True,
+    matching: MatchingRuntime | None = None,
 ) -> FastAPI:
     api_key = api_key if api_key is not None else (os.environ.get("API_KEY") or None)
     auth_disabled = _truthy(os.environ.get("API_AUTH_DISABLED")) if auth_disabled is None else auth_disabled
@@ -75,6 +78,7 @@ def create_app(
     app.state.factory = factory or session_factory(settings)
     app.state.api_key = None if auth_disabled else api_key
     app.state.configs = load_competitor_configs(settings.competitor_config_dir)
+    app.state.matching = matching or build_matching_runtime(settings)
     if sync_competitors:  # configured competitors appear at once
         with transaction(app.state.factory) as session:
             for config in app.state.configs.values():
@@ -109,6 +113,7 @@ def create_app(
         log.exception("unhandled API error")
         return JSONResponse(error_body("internal_error", f"{type(exc).__name__}"), status_code=500)
 
-    for module in (system, competitors, jobs, categories, products, observations, runs, matches, notifications):
+    routers = (system, competitors, jobs, categories, products, observations, runs, matching_routes, notifications)
+    for module in routers:
         app.include_router(module.router, prefix=API_PREFIX)
     return app

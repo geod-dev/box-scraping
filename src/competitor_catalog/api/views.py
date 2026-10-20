@@ -20,6 +20,7 @@ from competitor_catalog.db.models import (
     ScrapeObservation,
     WorkerJob,
 )
+from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.services import jobs as job_service
 from competitor_catalog.services.estimates import estimate_job
 
@@ -45,6 +46,7 @@ def job_out(job: WorkerJob, competitor_key: str) -> schemas.JobOut:
         pause_requested_at=job.pause_requested_at,
         paused_at=job.paused_at,
         scrape_run_id=job.scrape_run_id,
+        resumed_from_job_id=job.resumed_from_job_id,
         step=job.step,
         step_label=job_service.STEP_LABELS.get(job.step or "", job.step),
         step_done=job.step_done,
@@ -66,7 +68,7 @@ def jobs_out(session: Session, jobs: Iterable[WorkerJob]) -> list[schemas.JobOut
     return [job_out(job, keys.get(job.competitor_id, "?")) for job in jobs]
 
 
-def worker_out(session: Session, competitor: Competitor) -> schemas.WorkerOut:
+def worker_out(session: Session, competitor: Competitor, matching: MatchingRuntime | None = None) -> schemas.WorkerOut:
     active = job_service.active_job(session, competitor.id)
     last = session.scalar(
         select(WorkerJob)
@@ -88,7 +90,7 @@ def worker_out(session: Session, competitor: Competitor) -> schemas.WorkerOut:
         state = "running"
     tasks = {
         task: schemas.TaskAvailability(allowed=reason is None, reason=reason)
-        for task, reason in job_service.allowed_tasks(session, competitor).items()
+        for task, reason in job_service.allowed_tasks(session, competitor, matching).items()
     }
     return schemas.WorkerOut(
         competitor_key=competitor.key,
@@ -122,7 +124,7 @@ def competitor_stats(session: Session, competitor_id: int) -> schemas.Competitor
     )
 
 
-def competitor_out(session: Session, competitor: Competitor) -> dict[str, Any]:
+def competitor_out(session: Session, competitor: Competitor, matching: MatchingRuntime | None = None) -> dict[str, Any]:
     return {
         "id": competitor.id,
         "key": competitor.key,
@@ -137,19 +139,25 @@ def competitor_out(session: Session, competitor: Competitor) -> dict[str, Any]:
         "created_at": competitor.created_at,
         "updated_at": competitor.updated_at,
         "stats": competitor_stats(session, competitor.id),
-        "worker": worker_out(session, competitor),
+        "worker": worker_out(session, competitor, matching),
     }
 
 
-def competitor_detail(session: Session, competitor: Competitor, config: CompetitorConfig | None) -> dict[str, Any]:
-    data = competitor_out(session, competitor)
+def competitor_detail(
+    session: Session, competitor: Competitor, config: CompetitorConfig | None, matching: MatchingRuntime | None = None
+) -> dict[str, Any]:
+    data = competitor_out(session, competitor, matching)
     data["config"] = competitor.config
     estimates = {}
     if config is not None:
         for task in job_service.TASKS:
+            if task == "matching" and (matching is None or competitor.key == matching.config.reference_competitor):
+                continue
             options = job_service.normalize_options(task, {})
             estimates[task] = schemas.EstimateOut(
-                **estimate_job(session, competitor.id, config, task, options).as_dict()
+                **estimate_job(
+                    session, competitor.id, config, task, options, matching_config=matching.config if matching else None
+                ).as_dict()
             )
     data["estimates"] = estimates
     return data

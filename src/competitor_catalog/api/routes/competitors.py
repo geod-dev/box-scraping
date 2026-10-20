@@ -8,7 +8,14 @@ from fastapi import APIRouter, Body, Depends
 from sqlalchemy import select
 
 from competitor_catalog.api import schemas, views
-from competitor_catalog.api.deps import ApiError, ConfigsDep, SessionDep, competitor_or_404, require_api_key
+from competitor_catalog.api.deps import (
+    ApiError,
+    ConfigsDep,
+    MatchingDep,
+    SessionDep,
+    competitor_or_404,
+    require_api_key,
+)
 from competitor_catalog.db.models import Competitor
 from competitor_catalog.services import jobs as job_service
 from competitor_catalog.services.estimates import estimate_job
@@ -25,8 +32,23 @@ REFUSAL_STATUS = {
     "job_stopping": 409,
     "invalid_options": 422,
     "invalid_task": 422,
+    "matching_reference": 409,
+    "reference_missing": 409,
+    "matching_not_configured": 409,
+    "reference_catalog_required": 409,
+    "job_not_restartable": 409,
+    "nothing_to_retry": 409,
 }
-JobBody = Annotated[schemas.JobIn, Body(examples=[{"task": "catalog_sync"}, {"task": "price_refresh"}])]
+JobBody = Annotated[
+    schemas.JobIn,
+    Body(
+        examples=[
+            {"task": "catalog_sync"},
+            {"task": "price_refresh"},
+            {"task": "matching", "options": {"mode": "incremental"}},
+        ]
+    ),
+]
 
 
 def refusal(exc: job_service.JobRequestError) -> ApiError:
@@ -34,37 +56,39 @@ def refusal(exc: job_service.JobRequestError) -> ApiError:
 
 
 @router.get("", response_model=list[schemas.CompetitorOut], summary="List competitors with their worker state")
-def list_competitors(session: SessionDep):
+def list_competitors(session: SessionDep, matching: MatchingDep):
     competitors = session.scalars(select(Competitor).order_by(Competitor.name))
-    return [views.competitor_out(session, c) for c in competitors]
+    return [views.competitor_out(session, c, matching) for c in competitors]
 
 
 @router.get("/{key}", response_model=schemas.CompetitorDetailOut, summary="One competitor (key or id)")
-def get_competitor(key: str, session: SessionDep, configs: ConfigsDep):
+def get_competitor(key: str, session: SessionDep, configs: ConfigsDep, matching: MatchingDep):
     """Includes the estimated duration/credits of each task with default options."""
     competitor = competitor_or_404(session, key)
-    return views.competitor_detail(session, competitor, configs.get(competitor.key))
+    return views.competitor_detail(session, competitor, configs.get(competitor.key), matching)
 
 
 @router.get("/{key}/worker", response_model=schemas.WorkerOut, summary="Worker state, current job and progress")
-def get_worker(key: str, session: SessionDep):
+def get_worker(key: str, session: SessionDep, matching: MatchingDep):
     """Poll this every 2-5 s while ``state`` is ``queued``/``running``/``stopping``."""
-    return views.worker_out(session, competitor_or_404(session, key))
+    return views.worker_out(session, competitor_or_404(session, key), matching)
 
 
 @router.post(
     "/{key}/worker/start",
     response_model=schemas.JobOut,
     status_code=202,
-    summary="Start the worker on a task (catalog_sync or price_refresh)",
+    summary="Start the worker on a task (catalog_sync, price_refresh or matching)",
     responses={409: {"model": schemas.ErrorResponse}, 422: {"model": schemas.ErrorResponse}},
 )
-def start_worker(key: str, body: JobBody, session: SessionDep, configs: ConfigsDep):
+def start_worker(key: str, body: JobBody, session: SessionDep, configs: ConfigsDep, matching: MatchingDep):
     """Queues a job; the worker process picks it up within a few seconds.
 
     Refusals (HTTP 409): ``worker_busy`` (the competitor already has a queued/running job,
-    whatever its task), ``catalog_required`` (price refresh before any full catalog sync),
-    ``competitor_disabled``.
+    whatever its task), ``catalog_required`` (price refresh or matching before any full
+    catalog sync), ``competitor_disabled``; matching only: ``matching_reference`` (the
+    reference catalog itself), ``reference_catalog_required``, ``reference_missing``,
+    ``matching_not_configured`` (no VOYAGE_API_KEY).
     """
     competitor = competitor_or_404(session, key)
     config = configs.get(competitor.key)
@@ -72,7 +96,7 @@ def start_worker(key: str, body: JobBody, session: SessionDep, configs: ConfigsD
         raise ApiError(409, "competitor_not_configured", f"no configuration file for {competitor.key}")
     try:
         job = job_service.enqueue_job(
-            session, competitor, config, body.task, body.options.model_dump(), requested_by="api"
+            session, competitor, config, body.task, body.options.model_dump(), requested_by="api", matching=matching
         )
     except job_service.JobRequestError as exc:
         raise refusal(exc) from None
@@ -147,7 +171,7 @@ def resume_worker(key: str, session: SessionDep):
     response_model=schemas.EstimateOut,
     summary="Estimate the duration/credits of a task without starting it",
 )
-def estimate(key: str, body: JobBody, session: SessionDep, configs: ConfigsDep):
+def estimate(key: str, body: JobBody, session: SessionDep, configs: ConfigsDep, matching: MatchingDep):
     competitor = competitor_or_404(session, key)
     config = configs.get(competitor.key)
     if config is None:
@@ -156,4 +180,6 @@ def estimate(key: str, body: JobBody, session: SessionDep, configs: ConfigsDep):
         options = job_service.normalize_options(body.task, body.options.model_dump())
     except job_service.JobRequestError as exc:
         raise refusal(exc) from None
-    return schemas.EstimateOut(**estimate_job(session, competitor.id, config, body.task, options).as_dict())
+    return schemas.EstimateOut(
+        **estimate_job(session, competitor.id, config, body.task, options, matching_config=matching.config).as_dict()
+    )

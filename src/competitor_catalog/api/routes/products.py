@@ -22,6 +22,7 @@ from competitor_catalog.api.deps import (
 )
 from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import Category, Product, ProductMatch, ScrapeObservation
+from competitor_catalog.matching import service as matching_service
 
 router = APIRouter(prefix="/products", tags=["products"], dependencies=[Depends(require_api_key)])
 
@@ -88,7 +89,6 @@ def _filtered(
                 or_(
                     Product.title.ilike(like),
                     Product.catalog_reference.ilike(like),
-                    Product.antalis_reference.ilike(like),
                     Product.brand.ilike(like),
                     Product.description.ilike(like),
                 )
@@ -98,7 +98,7 @@ def _filtered(
     if brand:
         stmt = stmt.where(Product.brand.in_(brand))
     if reference:
-        stmt = stmt.where(or_(Product.catalog_reference.in_(reference), Product.antalis_reference.in_(reference)))
+        stmt = stmt.where(Product.catalog_reference.in_(reference))
     if has_price is not None:
         exists = select(ScrapeObservation.id).where(ScrapeObservation.product_id == Product.id).exists()
         stmt = stmt.where(exists if has_price else ~exists)
@@ -120,7 +120,7 @@ def list_products(
     q: Annotated[str | None, Query(description="words searched in title, references, brand, description")] = None,
     status: schemas.LifecycleStatus | None = None,
     brand: Annotated[list[str] | None, Query(description="repeatable")] = None,
-    reference: Annotated[list[str] | None, Query(description="catalog or Antalis reference, repeatable")] = None,
+    reference: Annotated[list[str] | None, Query(description="catalog reference, repeatable")] = None,
     has_price: bool | None = None,
     attr: Annotated[
         list[str] | None,
@@ -153,7 +153,7 @@ def list_products(
 
 
 def _columns(product: Product) -> dict[str, Any]:
-    return {c.key: getattr(product, c.key) for c in Product.__mapper__.column_attrs}
+    return {c.key: getattr(product, c.key) for c in Product.__mapper__.column_attrs if c.key != "antalis_reference"}
 
 
 @router.get("/facets", response_model=schemas.ProductFacets, summary="Filter values for the current search")
@@ -235,17 +235,28 @@ def get_product(product_id: int, session: SessionDep):
 
 def _detail(session, product: Product) -> dict[str, Any]:
     prices = views.price_summaries(session, [product.id])
+    associated = ProductMatch.status.in_(("auto_matched", "validated"))
     matches = session.scalar(
         select(func.count())
         .select_from(ProductMatch)
-        .where(or_(ProductMatch.product_a_id == product.id, ProductMatch.product_b_id == product.id))
+        .where(associated, or_(ProductMatch.antalis_product_id == product.id, ProductMatch.product_id == product.id))
     )
+    match = session.scalar(select(ProductMatch).where(ProductMatch.product_id == product.id))
     return {
         **_columns(product),
         "latest_price": prices.get(product.id),
         "category_path": views.category_path(session, product.category_id),
         "latest_prices": repo.latest_observations(session, product.id),
         "match_count": matches,
+        "matching": schemas.MatchBriefOut(
+            match_id=match.id,
+            status=match.status,
+            antalis_product_id=match.antalis_product_id,
+            proposed_antalis_product_id=match.proposed_antalis_product_id,
+            score=float(match.score) if match.score is not None else None,
+        )
+        if match
+        else None,
     }
 
 
@@ -275,17 +286,34 @@ def update_product(product_id: int, body: schemas.ProductUpdate, session: Sessio
     if {"catalog_reference", "url"} & set(changes):
         product.identity_key = repo.product_identity_key(product.catalog_reference, product.url)
     _commit(session)
+    # matches computed from the former values become deprecated (with a notification)
+    matching_service.detect_stale_matches(session, product_ids=[product.id])
+    session.commit()
     return _detail(session, product)
 
 
 @router.delete("/{product_id}", status_code=204, summary="Delete a product and its price history")
 def delete_product(product_id: int, session: SessionDep):
-    """Deletes its price observations and matches too. A later catalog sync recreates the
-    product if it is still listed on the site."""
+    """Deletes its price observations and its own match too; the matches associated with it
+    (a reference product) become deprecated. A later catalog sync recreates the product if
+    it is still listed on the site."""
     product = _product(session, product_id)
+    watching = list(
+        session.scalars(
+            select(ProductMatch.product_id).where(
+                or_(
+                    ProductMatch.antalis_product_id == product.id,
+                    ProductMatch.proposed_antalis_product_id == product.id,
+                )
+            )
+        )
+    )
     session.execute(delete(ScrapeObservation).where(ScrapeObservation.product_id == product.id))
     session.delete(product)
     session.commit()
+    if watching:
+        matching_service.detect_stale_matches(session, product_ids=watching)
+        session.commit()
     return Response(status_code=204)
 
 
