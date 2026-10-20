@@ -95,6 +95,7 @@ def _briefs(session: Session, ids: set[int]) -> dict[int, schemas.ProductBriefOu
             category=category,
             status=p.status,
             normalized_attributes=p.normalized_attributes,
+            image_url=views.image_url(p.images),
         )
         for p, category in rows
     }
@@ -319,7 +320,7 @@ def get_config(matching: MatchingDep):
     )
 
 
-def _summary_out(session: Session, competitor: Competitor, matching: MatchingRuntime) -> schemas.MatchingSummaryOut:
+def summary_out(session: Session, competitor: Competitor, matching: MatchingRuntime) -> schemas.MatchingSummaryOut:
     code = service.refusal(session, competitor, matching)
     active = job_service.active_job(session, competitor.id)
     if code is None and active is not None:
@@ -359,7 +360,7 @@ def get_summary(
         competitors = [competitor_or_404(session, competitor)]
     else:
         competitors = list(session.scalars(select(Competitor).order_by(Competitor.name)))
-    return [_summary_out(session, c, matching) for c in competitors if c.key != matching.config.reference_competitor]
+    return [summary_out(session, c, matching) for c in competitors if c.key != matching.config.reference_competitor]
 
 
 # --------------------------------------------------------------------------- runs

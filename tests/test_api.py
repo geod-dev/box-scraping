@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import json
+import socket
+import threading
+import time
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
+import uvicorn
 import yaml
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
 from competitor_catalog.api.main import create_app
 from competitor_catalog.api.openapi import openapi_schema
+from competitor_catalog.db.models import ScrapeRun
+from competitor_catalog.db.session import transaction
 from competitor_catalog.services.dispatcher import Dispatcher, DispatcherConfig
+from competitor_catalog.services.notifications import notify
 from competitor_catalog.settings import PROJECT_ROOT, Settings
 from tests.conftest import FakeFetcher
 from tests.test_jobs_db import TOY_YAML
@@ -298,3 +308,170 @@ def test_retry_failed_pages_and_restart_through_the_api(client, worker):
         json={"task": "catalog_sync", "options": {"retry_failed_run_id": 999999}},
     )
     assert other.status_code == 422 and other.json()["error"]["code"] == "invalid_options"
+
+
+def _product_with_prices(client, reference: str, prices: list[tuple[str, str, dict]]) -> dict:
+    product = client.post(
+        "/api/v1/products",
+        json={"competitor": "toy", "url": f"https://shop.toy.test/p/{reference}", "catalog_reference": reference},
+    ).json()
+    for price, observed_at, extra in prices:
+        body = {"product_id": product["id"], "price": price, "observed_at": observed_at, **extra}
+        assert client.post("/api/v1/observations", json=body).status_code == 201
+    return product
+
+
+@pytest.mark.db
+def test_price_trend_is_the_last_from_price_change(client):
+    flat = _product_with_prices(client, "FLAT", [("10", "2026-01-01T00:00:00Z", {})] * 2)
+    assert client.get(f"/api/v1/products/{flat['id']}").json()["price_trend"] is None
+    product = _product_with_prices(
+        client,
+        "T",
+        [
+            ("10", "2026-01-01T00:00:00Z", {}),
+            ("12.5", "2026-01-02T00:00:00Z", {}),
+            ("12.5", "2026-01-03T00:00:00Z", {}),
+            ("99", "2026-01-04T00:00:00Z", {"price_unit_quantity": "1000"}),  # other unit basis: no change
+        ],
+    )
+    trend = client.get(f"/api/v1/products/{product['id']}").json()["price_trend"]
+    assert trend["previous_price"] == "10" and trend["change_percent"] == 25.0
+    assert datetime.fromisoformat(trend["changed_at"]) == datetime(2026, 1, 2, tzinfo=UTC)
+    listed = client.get("/api/v1/products", params={"reference": ["T", "FLAT"], "sort": "reference"}).json()
+    assert [p["price_trend"] for p in listed["items"]] == [None, trend]
+
+
+@pytest.mark.db
+def test_stats_overview(client, worker, factory):
+    client.post("/api/v1/competitors/toy/worker/start", json={"task": "catalog_sync"})
+    worker()
+    with transaction(factory) as session:  # the fake fetcher costs no Scrape.do credit
+        session.execute(update(ScrapeRun).values(credits_used=7))
+    stats = client.get("/api/v1/stats/overview", params={"days": 7}).json()
+    assert stats["days"] == 7 and len(stats["daily"]) == 7
+    dates = [date.fromisoformat(d["date"]) for d in stats["daily"]]
+    assert dates == sorted(dates) and dates[-1] - dates[0] == timedelta(days=6)
+    today = stats["daily"][-1]
+    assert today["observations"] == 4 and today["products_created"] == 4 and today["jobs_succeeded"] == 1
+    assert today["credits_used"] == 7 and today["price_changes"] == 0
+    assert all(d["observations"] == 0 for d in stats["daily"][:-1])
+    totals = stats["totals"]
+    assert totals["observations"] == 4 and totals["credits_used"] == 7
+    assert totals["jobs"] == {"succeeded": 1, "partial": 0, "failed": 0, "cancelled": 0, "interrupted": 0}
+    assert stats["credits"]["monthly_limit"] is None and "SCRAPEDO_API_KEY" in stats["credits"]["error"]
+    assert stats["price_position"] == [
+        {"competitor_key": "toy", "pairs": 0, "cheaper": 0, "same": 0, "pricier": 0, "median_gap_percent": None}
+    ]
+
+    first = client.get("/api/v1/products", params={"competitor": "toy", "sort": "reference"}).json()["items"][0]
+    tier = client.get(f"/api/v1/products/{first['id']}/prices").json()[0]  # 10, observed by the sync
+    basis = {k: tier[k] for k in ("currency", "price_basis", "price_unit", "price_unit_quantity", "tax_mode")}
+    body = {"product_id": first["id"], "price": "8", "observed_at": "2020-01-01T00:00:00Z", **basis}
+    client.post("/api/v1/observations", json=body)  # 8 long ago, then 10 today: an increase
+    body["observed_at"] = datetime.now(UTC).isoformat()  # then 8 again: a decrease
+    client.post("/api/v1/observations", json=body)
+    stats = client.get("/api/v1/stats/overview", params={"tz": "Europe/Paris"}).json()
+    assert stats["days"] == 30
+    assert (stats["totals"]["price_increases"], stats["totals"]["price_decreases"]) == (1, 1)
+    assert stats["daily"][-1]["price_changes"] == 2
+    r = client.get("/api/v1/stats/overview", params={"tz": "Mars/Olympus"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "invalid_time_zone"
+
+
+def _events(messages: list[str]) -> list[tuple[str, dict]]:
+    parsed = []
+    for message in messages:
+        fields = dict(line.split(": ", 1) for line in message.strip().splitlines())
+        parsed.append((fields["event"], json.loads(fields["data"])))
+    return parsed
+
+
+@pytest.mark.db
+def test_event_hub_broadcasts_what_changed(client, worker):
+    hub = client.app.state.events
+    assert hub.poll() == []  # first poll: baseline only
+    assert hub.summary == {
+        "jobs": [],
+        "competitors": [
+            {"key": "toy", "name": "Toy competitor", "enabled": True, "worker_state": "idle", "job_id": None}
+        ],
+        "matching": {"needs_review": 0, "deprecated": 0},
+        "notifications": {"unread": 0, "by_level": {}},
+    }
+
+    job = client.post("/api/v1/competitors/toy/worker/start", json={"task": "catalog_sync"}).json()
+    events = _events(hub.poll())
+    assert [name for name, _ in events] == ["job.updated", "competitor.updated", "console.summary"]
+    assert events[0][1] == job
+    assert events[1][1]["worker"]["state"] == "queued"
+    assert [j["id"] for j in events[2][1]["jobs"]] == [job["id"]]
+    assert events[2][1]["competitors"][0]["job_id"] == job["id"]
+    assert hub.poll() == []  # nothing changed
+
+    worker()
+    events = _events(hub.poll())
+    assert [name for name, _ in events] == [
+        "job.updated",
+        "job.finished",
+        "notification.created",
+        "notification.created",
+        "competitor.updated",
+        "console.summary",
+    ]
+    assert events[1][1]["status"] == "succeeded"
+    assert [e[1]["kind"] for e in events[2:4]] == ["job_started", "job_succeeded"]
+    assert events[4][1]["worker"]["state"] == "idle" and events[4][1]["last_full_catalog_at"]
+    assert events[5][1]["jobs"] == [] and events[5][1]["notifications"]["unread"] == 2
+
+    # a job created and finished between two polls is still reported
+    job = client.post("/api/v1/competitors/toy/worker/start", json={"task": "price_refresh"}).json()
+    client.post(f"/api/v1/jobs/{job['id']}/cancel")
+    assert [name for name, _ in _events(hub.poll())][:2] == ["job.updated", "job.finished"]
+
+
+@pytest.mark.db
+def test_event_stream_over_http(factory, config_dir):
+    settings = Settings(None, None, config_dir, "INFO", None)
+    app = create_app(settings, factory, api_key=API_KEY, auth_disabled=False)
+    app.state.events.poll_seconds = 0.1
+    app.state.events.heartbeat_seconds = 0.3
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, lifespan="on"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started and time.monotonic() < deadline:
+        thread.join(0.05)
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}/api/v1", timeout=10) as http:
+            assert http.get("/events", headers={"X-API-Key": "wrong"}).status_code == 401
+            with http.stream("GET", "/events", headers={"X-API-Key": API_KEY}) as response:
+                assert response.status_code == 200
+                assert response.headers["content-type"].startswith("text/event-stream")
+                lines = response.iter_lines()
+                assert next(lines) == "retry: 3000"
+                assert next(lines) == ""
+                assert next(lines) == "event: console.summary"
+                assert json.loads(next(lines).removeprefix("data: "))["competitors"][0]["key"] == "toy"
+                with transaction(factory) as session:
+                    notify(session, level="warning", kind="test", title="Hello")
+                seen = set()
+                for line in lines:
+                    if line in ("event: notification.created", ": ping"):
+                        seen.add(line)
+                    elif line.startswith("data: ") and '"title":"Hello"' in line:
+                        seen.add("data")
+                    if len(seen) == 3:
+                        break
+                assert seen == {"event: notification.created", ": ping", "data"}
+        hub = app.state.events
+        deadline = time.monotonic() + 5  # the closed stream unsubscribes, then the poller stops
+        while (hub._subscribers or not hub._task.done()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not hub._subscribers and hub._task.done()
+    finally:
+        server.should_exit = True
+        thread.join(10)

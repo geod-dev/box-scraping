@@ -414,6 +414,15 @@ class PriceSummary(BaseModel):
     displayed: bool = Field(description="false when the site shows no price (value from structured data)")
 
 
+class PriceTrend(BaseModel):
+    """Last change of the "from" price (first tier) between two captures with the same currency,
+    unit basis and tax mode."""
+
+    previous_price: Decimal = Field(description="from price before the change")
+    change_percent: float = Field(description="(new - previous) / previous * 100, rounded to 2 decimals")
+    changed_at: datetime = Field(description="capture where the new price was first observed")
+
+
 # --------------------------------------------------------------------------- products
 
 
@@ -442,6 +451,7 @@ class ProductListItem(ProductOut):
     normalized_attributes: dict[str, Any] | None
     images: list[Any] | None
     latest_price: PriceSummary | None
+    price_trend: PriceTrend | None = Field(description="last change of the from price; null if it never changed")
 
 
 class MatchBriefOut(BaseModel):
@@ -581,6 +591,7 @@ class ProductBriefOut(BaseModel):
     category: str | None
     status: LifecycleStatus
     normalized_attributes: dict[str, Any] | None = None
+    image_url: str | None = Field(None, description="first product image")
 
 
 class ReasonOut(BaseModel):
@@ -895,3 +906,83 @@ class StatsOut(BaseModel):
     runs: int
     active_jobs: int
     unread_notifications: int
+
+
+class DailyStats(BaseModel):
+    date: str = Field(description="YYYY-MM-DD in the requested time zone")
+    observations: int = Field(description="price observations (tiers) captured")
+    products_created: int = Field(description="products first seen")
+    products_marked_missing: int = Field(description="products flagged missing by the catalog syncs finished that day")
+    price_changes: int = Field(description="captures whose from price differs from the previous comparable capture")
+    credits_used: int = Field(description="Scrape.do credits of the runs started that day")
+    jobs_succeeded: int
+    jobs_failed: int
+    matches_auto: int = Field(description="engine results that became auto_matched")
+    matches_validated: int
+    matches_rejected: int
+
+
+class JobStatusTotals(BaseModel):
+    succeeded: int = 0
+    partial: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    interrupted: int = 0
+
+
+class StatsTotals(BaseModel):
+    observations: int
+    products_created: int
+    credits_used: int
+    price_increases: int
+    price_decreases: int
+    jobs: JobStatusTotals = Field(description="jobs finished over the period, by final status")
+
+
+class CreditsOut(BaseModel):
+    monthly_limit: int | None = Field(description="Scrape.do monthly request quota")
+    monthly_remaining: int | None
+    renews_at: datetime | None = Field(description="not given by Scrape.do: null")
+    error: str | None = Field(None, description="why the figures are null (no key, Scrape.do unavailable)")
+
+
+class PricePosition(BaseModel):
+    competitor_key: str
+    pairs: int = Field(description="associated pairs with a comparable latest from price on both sides")
+    cheaper: int = Field(description="competitor price lower by 1 % or more")
+    same: int = Field(description="|gap| < 1 %")
+    pricier: int = Field(description="competitor price higher by 1 % or more")
+    median_gap_percent: float | None = Field(description="median of (competitor - antalis) / antalis * 100")
+
+
+class StatsOverview(BaseModel):
+    days: int
+    daily: list[DailyStats] = Field(description="one row per day, oldest first, zeros included")
+    totals: StatsTotals
+    credits: CreditsOut = Field(description="Scrape.do quota, cached about 60 s")
+    price_position: list[PricePosition] = Field(description="per non-reference competitor")
+
+
+# --------------------------------------------------------------------------- events (SSE)
+
+
+class ConsoleCompetitor(BaseModel):
+    key: str
+    name: str
+    enabled: bool
+    worker_state: WorkerState
+    job_id: int | None = Field(description="active job")
+
+
+class MatchingTotals(BaseModel):
+    needs_review: int
+    deprecated: int
+
+
+class ConsoleSummary(BaseModel):
+    """Payload of the ``console.summary`` event."""
+
+    jobs: list[JobOut] = Field(description="active jobs (queued/running/paused), newest first")
+    competitors: list[ConsoleCompetitor]
+    matching: MatchingTotals = Field(description="totals across the non-reference competitors")
+    notifications: UnreadCount

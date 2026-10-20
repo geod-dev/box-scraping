@@ -434,6 +434,7 @@ def cmd_api(args: argparse.Namespace, settings: Any) -> int:
         log_config=None,  # keep our logging configuration (secret redaction)
         proxy_headers=True,
         forwarded_allow_ips="*",
+        timeout_graceful_shutdown=5,  # open event streams (GET /events) never finish on their own
     )
     return 0
 

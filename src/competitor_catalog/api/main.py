@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -14,7 +16,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from competitor_catalog import __version__
-from competitor_catalog.api import mcp
+from competitor_catalog.api import events, mcp
 from competitor_catalog.api.deps import ApiError, error_body
 from competitor_catalog.api.routes import (
     categories,
@@ -24,6 +26,7 @@ from competitor_catalog.api.routes import (
     observations,
     products,
     runs,
+    stats,
     system,
 )
 from competitor_catalog.api.routes import matching as matching_routes
@@ -70,7 +73,13 @@ def create_app(
         log.warning("API authentication is DISABLED")
     register_secret(api_key)  # the MCP endpoint receives it in the URL (access logs)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        yield
+        await app.state.events.stop()
+
     app = FastAPI(
+        lifespan=lifespan,
         title="Competitor catalog API",
         version=__version__,
         description=DESCRIPTION,
@@ -83,6 +92,7 @@ def create_app(
     app.state.api_key = None if auth_disabled else api_key
     app.state.configs = load_competitor_configs(settings.competitor_config_dir)
     app.state.matching = matching or build_matching_runtime(settings)
+    app.state.events = events.EventHub(app)
     if sync_competitors:  # configured competitors appear at once
         with transaction(app.state.factory) as session:
             for config in app.state.configs.values():
@@ -117,7 +127,19 @@ def create_app(
         log.exception("unhandled API error")
         return JSONResponse(error_body("internal_error", f"{type(exc).__name__}"), status_code=500)
 
-    routers = (system, competitors, jobs, categories, products, observations, runs, matching_routes, notifications)
+    routers = (
+        system,
+        stats,
+        competitors,
+        jobs,
+        categories,
+        products,
+        observations,
+        runs,
+        matching_routes,
+        notifications,
+        events,
+    )
     for module in routers:
         app.include_router(module.router, prefix=API_PREFIX)
     app.include_router(mcp.router, prefix=API_PREFIX)  # last: its tools are the routes above

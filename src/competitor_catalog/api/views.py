@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -68,6 +69,21 @@ def jobs_out(session: Session, jobs: Iterable[WorkerJob]) -> list[schemas.JobOut
     return [job_out(job, keys.get(job.competitor_id, "?")) for job in jobs]
 
 
+def worker_state(active: WorkerJob | None) -> str:
+    """WorkerState of a competitor from its active job."""
+    if active is None:
+        return "idle"
+    if active.status == "queued":
+        return "queued"
+    if active.cancel_requested_at is not None:
+        return "stopping"
+    if active.status == "paused":
+        return "paused" if active.pause_requested_at is not None else "resuming"
+    if active.pause_requested_at is not None:
+        return "pausing"
+    return "running"
+
+
 def worker_out(session: Session, competitor: Competitor, matching: MatchingRuntime | None = None) -> schemas.WorkerOut:
     active = job_service.active_job(session, competitor.id)
     last = session.scalar(
@@ -76,18 +92,7 @@ def worker_out(session: Session, competitor: Competitor, matching: MatchingRunti
         .order_by(WorkerJob.created_at.desc(), WorkerJob.id.desc())
         .limit(1)
     )
-    if active is None:
-        state = "idle"
-    elif active.status == "queued":
-        state = "queued"
-    elif active.cancel_requested_at is not None:
-        state = "stopping"
-    elif active.status == "paused":
-        state = "paused" if active.pause_requested_at is not None else "resuming"
-    elif active.pause_requested_at is not None:
-        state = "pausing"
-    else:
-        state = "running"
+    state = worker_state(active)
     tasks = {
         task: schemas.TaskAvailability(allowed=reason is None, reason=reason)
         for task, reason in job_service.allowed_tasks(session, competitor, matching).items()
@@ -196,6 +201,67 @@ def price_summaries(session: Session, product_ids: list[int]) -> dict[int, schem
             displayed=(first["metadata"] or {}).get("displayed", True) is not False,
         )
     return result
+
+
+# "From" price of each capture (its first tier, as in PriceSummary.from_price) and the one of
+# the previous capture of the same product. {where} filters scrape_observations (alias o).
+FROM_PRICE_CHANGES = """
+WITH firsts AS (
+    SELECT DISTINCT ON (o.capture_id) o.id, o.product_id, o.observed_at, o.price, o.currency,
+           o.price_basis, o.price_unit, o.price_unit_quantity, o.tax_mode
+    FROM scrape_observations o
+    {where}
+    ORDER BY o.capture_id, o.min_quantity NULLS FIRST, o.quantity NULLS FIRST, o.id
+), seq AS (
+    SELECT f.*,
+           LAG(f.price) OVER w AS previous_price,
+           LAG(f.currency) OVER w AS previous_currency,
+           LAG(f.price_basis) OVER w AS previous_basis,
+           LAG(f.price_unit) OVER w AS previous_unit,
+           LAG(f.price_unit_quantity) OVER w AS previous_unit_quantity,
+           LAG(f.tax_mode) OVER w AS previous_tax_mode
+    FROM firsts f
+    WINDOW w AS (PARTITION BY f.product_id ORDER BY f.observed_at, f.id)
+)
+SELECT * FROM seq
+WHERE previous_price > 0 AND price <> previous_price
+  AND currency = previous_currency AND price_basis = previous_basis AND tax_mode = previous_tax_mode
+  AND price_unit IS NOT DISTINCT FROM previous_unit
+  AND price_unit_quantity IS NOT DISTINCT FROM previous_unit_quantity
+"""
+
+
+def change_percent(price: Decimal, previous: Decimal) -> float:
+    return round(float((price - previous) / previous * 100), 2)
+
+
+def price_trends(session: Session, product_ids: list[int]) -> dict[int, schemas.PriceTrend]:
+    """Last change of the "from" price of each product (only between captures with the same
+    currency, unit basis and tax mode: a change of unit is not a price change)."""
+    if not product_ids:
+        return {}
+    changes = FROM_PRICE_CHANGES.format(where="WHERE o.product_id = ANY(:ids)")
+    rows = session.execute(
+        text(f"SELECT DISTINCT ON (product_id) * FROM ({changes}) c ORDER BY product_id, observed_at DESC, id DESC"),
+        {"ids": product_ids},
+    ).mappings()
+    return {
+        row["product_id"]: schemas.PriceTrend(
+            previous_price=row["previous_price"],
+            change_percent=change_percent(row["price"], row["previous_price"]),
+            changed_at=row["observed_at"],
+        )
+        for row in rows
+    }
+
+
+def image_url(images: list[Any] | None) -> str | None:
+    """URL of the first product image (adapters store ``{"url": ...}`` objects)."""
+    for image in images or []:
+        url = image.get("url") if isinstance(image, dict) else image
+        if isinstance(url, str) and url:
+            return url
+    return None
 
 
 def category_path(session: Session, category_id: int | None) -> list[Category]:

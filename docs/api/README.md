@@ -250,6 +250,64 @@ Each notification: `id`, `created_at`, `level`, `kind`, `title`, `message`,
 `POST /{id}/unread`, `POST /read-all` (optionally `competitor`, `level`, `up_to_id`),
 `DELETE /{id}`.
 
+### Live events (Server-Sent Events)
+
+`GET /events` (header `X-API-Key`) is a `text/event-stream` that replaces polling. Named
+events, JSON in `data:` (same schemas as the REST endpoints):
+
+| event | data | when |
+|---|---|---|
+| `console.summary` | `{jobs, competitors, matching, notifications}` (below) | on connect, then whenever any part changes |
+| `job.updated` | Job (as `GET /jobs/{id}`) | any change of an active job (at most ~1/s per job), and job creation |
+| `job.finished` | Job | the job reached `succeeded`, `partial`, `failed`, `cancelled` or `interrupted` |
+| `notification.created` | Notification | a new notification |
+| `matching.updated` | MatchingSummary (as `GET /matching/summary`) | match counts of a competitor changed (run results, validate/reject/reset, matches becoming obsolete) |
+| `competitor.updated` | Competitor (as `GET /competitors/{key}`, without config/estimates) | worker state or sync timestamps changed |
+
+`console.summary`:
+
+```json
+{
+  "jobs": [/* active jobs (queued/running/paused), newest first */],
+  "competitors": [{"key": "antalis_fr", "name": "Antalis France", "enabled": true, "worker_state": "running", "job_id": 12}],
+  "matching": {"needs_review": 313, "deprecated": 0},
+  "notifications": {"unread": 5, "by_level": {"success": 3, "warning": 2}}
+}
+```
+
+`matching` totals the non-reference competitors. The stream starts with `retry: 3000`, sends
+a `: ping` comment every 15 s and flushes every event at once. The worker is another process:
+the API reads the database every second (only while a stream is open), so an event arrives
+up to ~1 s after the change. A job created and finished between two reads still gets its
+`job.updated` then `job.finished`. A client too slow to read is disconnected; on reconnect it
+receives a fresh `console.summary` (events missed meanwhile are not replayed: refetch the
+lists you display). Not available as an MCP tool.
+
+### Dashboard statistics
+
+`GET /stats/overview?days=30` (1-366, today included; `tz=Europe/Paris` for local days,
+default `UTC`):
+
+* `daily`: one row per day, oldest first, zeros included: `observations` (price tiers
+  captured), `products_created` (first seen), `products_marked_missing` (by the catalog syncs
+  finished that day), `price_changes`, `credits_used` (runs started that day), `jobs_succeeded`,
+  `jobs_failed`, `matches_auto` (engine results that became `auto_matched`),
+  `matches_validated`, `matches_rejected`.
+* `totals` over the period: `observations`, `products_created`, `credits_used`,
+  `price_increases`, `price_decreases`, `jobs` (finished jobs by final status).
+* `credits`: Scrape.do `monthly_limit` / `monthly_remaining` (cached ~60 s server-side,
+  Scrape.do allows 10 calls/min). `renews_at` is always null (Scrape.do does not give it);
+  all null with `error` when the key is not set or Scrape.do does not answer.
+* `price_position`: per non-reference competitor, over the associated pairs (`auto_matched` or
+  `validated`, both products active) whose latest from prices are comparable: same currency,
+  both the price of one sales unit (`price_basis` `unit`, `price_unit_quantity` 1 or null),
+  tax modes not known to differ. gap = (competitor - antalis) / antalis × 100: `cheaper`
+  (gap ≤ -1), `same` (|gap| < 1), `pricier` (gap ≥ 1), `median_gap_percent`.
+
+A **price change** is a capture whose from price (first tier) differs from the previous
+capture of the product with the same currency, unit basis and tax mode (a change of unit is
+not a price change). The same rule gives `price_trend` on products.
+
 ## Typical client flows
 
 **Dashboard / worker panel**
@@ -269,6 +327,9 @@ Each notification: `id`, `created_at`, `level`, `kind`, `title`, `message`,
 **Notifications**: poll `GET /notifications?since_id=<last id seen>` (or `unread-count`)
 every 15-30 s; mark read on display.
 
+Instead of polling (steps 3 and notifications), a console can keep one `GET /events` stream
+open: see [Live events](#live-events-server-sent-events).
+
 **Product search**
 
 * `GET /products?competitor=antalis_fr&q=caisse carton&category_id=12&attr=length_mm:305&brand=Siat&status=active&has_price=true&sort=title&order=asc&limit=50`
@@ -279,7 +340,9 @@ every 15-30 s; mark read on display.
   - `sort`: `title`, `reference`, `brand`, `created_at`, `updated_at`, `last_seen_at`,
     `last_price_observed_at`, `id`.
   Each item has `latest_price`: `{from_price, min_price, tiers, currency, tax_mode,
-  price_unit, price_unit_quantity, quantity_unit, observed_at, displayed}` or null.
+  price_unit, price_unit_quantity, quantity_unit, observed_at, displayed}` or null, and
+  `price_trend`: `{previous_price, change_percent, changed_at}` = the last change of the from
+  price (null if it never changed; also on `GET /products/{id}`).
 * `GET /products/facets` (same filters) → brands, statuses and the most frequent values of
   each normalized attribute, with counts: build filter widgets from it.
 * `GET /categories/tree?competitor=antalis_fr` for the category navigation.
@@ -357,7 +420,8 @@ configuration (the next run refreshes it).
 
 Each list item: `id`, `status`, `product` / `antalis_product` / `proposed_antalis_product`
 (`{id, competitor_key, catalog_reference, title, url, brand, category, status,
-normalized_attributes}`), `score`, `runner_up_score`, `score_gap`, `dimensions_compared`,
+normalized_attributes, image_url}`, the same product brief as in candidates and
+`rejected_antalis_products`; `image_url` = first product image or null), `score`, `runner_up_score`, `score_gap`, `dimensions_compared`,
 `decision_reasons`, decision and deprecation fields, `computed_at`, `job_id`, `revision`.
 
 **Review screen** – `GET /matching/products/{product_id}` = the list item plus:
@@ -399,7 +463,8 @@ kept, `matches_deprecated` notification). Obsolescence is detected after every c
 
 `POST /api/v1/mcp?api_key=<key>` is an [MCP](https://modelcontextprotocol.io) server
 (Streamable HTTP transport, stateless, JSON responses) whose tools are **every endpoint of
-this API**: an agent (Claude Code, Claude Desktop, ...) can list and call them directly.
+this API** but the event stream (`GET /events`): an agent (Claude Code, Claude Desktop, ...)
+can list and call them directly.
 
 * Add it to a client with the URL only, e.g.
   `claude mcp add --transport http catalog "https://<host>/api/v1/mcp?api_key=<key>"`.
@@ -424,6 +489,8 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | POST | `/mcp?api_key=<key>` | MCP server: every endpoint below as a tool (not in `openapi.json`) |
 | GET | `/health` | API, database and worker liveness (no auth) |
 | GET | `/stats` | global counters |
+| GET | `/stats/overview` | daily activity, period totals, Scrape.do credits, price position (`days`, `tz`) |
+| GET | `/events` | live console events (Server-Sent Events, not an MCP tool) |
 | GET | `/scrapedo/account` | Scrape.do plan and remaining credits (max 10 calls/min) |
 | GET | `/competitors` | competitors with stats and worker state |
 | GET | `/competitors/{key}` | + config snapshot and task estimates |

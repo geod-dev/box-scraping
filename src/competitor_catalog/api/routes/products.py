@@ -144,9 +144,13 @@ def list_products(
     column = SORTS[sort]
     stmt = stmt.order_by(column.desc().nulls_last() if order == "desc" else column.asc().nulls_last(), Product.id)
     result = page.page(session, stmt)
-    prices = views.price_summaries(session, [p.id for p in result["items"]])
+    ids = [p.id for p in result["items"]]
+    prices = views.price_summaries(session, ids)
+    trends = views.price_trends(session, ids)
     result["items"] = [
-        schemas.ProductListItem.model_validate({**_columns(p), "latest_price": prices.get(p.id)})
+        schemas.ProductListItem.model_validate(
+            {**_columns(p), "latest_price": prices.get(p.id), "price_trend": trends.get(p.id)}
+        )
         for p in result["items"]
     ]
     return result
@@ -245,6 +249,7 @@ def _detail(session, product: Product) -> dict[str, Any]:
     return {
         **_columns(product),
         "latest_price": prices.get(product.id),
+        "price_trend": views.price_trends(session, [product.id]).get(product.id),
         "category_path": views.category_path(session, product.category_id),
         "latest_prices": repo.latest_observations(session, product.id),
         "match_count": matches,

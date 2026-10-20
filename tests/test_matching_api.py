@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, update
 
 from competitor_catalog.api.main import create_app
-from competitor_catalog.db.models import Competitor
+from competitor_catalog.db.models import Competitor, Product
 from competitor_catalog.db.session import transaction
 from competitor_catalog.matching.service import MatchingRuntime
 from competitor_catalog.services.dispatcher import Dispatcher, DispatcherConfig
@@ -230,3 +232,52 @@ def test_products_without_dimensions(env):
     assert page["by_product_type"] == {"furniture": 1}
     assert env.get("/matching/dimensionless", competitor="packdiscount_fr", product_type="box")["total"] == 0
     assert env.get("/matching/dimensionless", competitor="packdiscount_fr", title_has_numbers="false")["total"] == 0
+
+
+def _observe(env, product_id: int, price: str, **basis) -> None:
+    body = {"product_id": product_id, "price": price, "price_basis": "unit", **basis}
+    env.post("/observations", body, status=201)
+
+
+def test_console_views_of_the_matches(env, factory):
+    hub = env.client.app.state.events
+    hub.poll()
+    env.post("/matching/competitors/packdiscount_fr/run", status=202)
+    env.work()
+    events = [m.split("\n", 2) for m in hub.poll()]
+    updated = [json.loads(data.removeprefix("data: ")) for name, data, _ in events if name == "event: matching.updated"]
+    assert [s["competitor_key"] for s in updated] == ["packdiscount_fr"]  # never the reference catalog
+    assert updated[0]["counts"]["auto_matched"] == 2 and updated[0]["needs_review"] == 1
+    summary = hub.summary["matching"]
+    assert summary == {"needs_review": 1, "deprecated": 0}
+
+    # first image in the product briefs
+    with transaction(factory) as session:
+        session.execute(
+            update(Product)
+            .where(Product.id == env.ids["A1"])
+            .values(images=[{"url": "https://img.test/a1.jpg", "position": 0}, {"url": "https://img.test/2.jpg"}])
+        )
+    detail = env.get(f"/matching/products/{env.ids['P1']}")
+    assert detail["antalis_product"]["image_url"] == "https://img.test/a1.jpg"
+    assert detail["product"]["image_url"] is None
+    assert detail["candidates"][0]["antalis_product"]["image_url"] == "https://img.test/a1.jpg"
+
+    # price position over the associated pairs (P1 -> A1 is auto_matched)
+    position = env.get("/stats/overview")["price_position"]
+    assert position == [
+        {
+            "competitor_key": "packdiscount_fr",
+            "pairs": 0,
+            "cheaper": 0,
+            "same": 0,
+            "pricier": 0,
+            "median_gap_percent": None,
+        }
+    ]
+    _observe(env, env.ids["A1"], "10", price_unit="unité", price_unit_quantity="1", tax_mode="excl_tax")
+    _observe(env, env.ids["P1"], "11", price_unit="UN", tax_mode="unknown")
+    position = env.get("/stats/overview")["price_position"][0]
+    assert position["pairs"] == 1 and position["pricier"] == 1 and position["median_gap_percent"] == 10.0
+    _observe(env, env.ids["P1"], "11", price_unit="UN", price_unit_quantity="1000", tax_mode="unknown")
+    assert env.get("/stats/overview")["price_position"][0]["pairs"] == 0  # per 1000: not comparable

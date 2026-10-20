@@ -1,4 +1,4 @@
-"""MCP server exposing every API route as a tool: ``POST /api/v1/mcp?api_key=<key>``.
+"""MCP server exposing every API route (except the event stream) as a tool: ``POST /api/v1/mcp?api_key=<key>``.
 
 Streamable HTTP transport, stateless, plain JSON responses (no SSE stream). The tools are
 generated from the app's OpenAPI schema, and a tool call is replayed in-process against the
@@ -59,6 +59,8 @@ def build_tools(app: FastAPI) -> dict[str, Tool]:
     tools: dict[str, Tool] = {}
     for path, operations in schema.get("paths", {}).items():
         for method, op in operations.items():
+            if _is_stream(op):
+                continue  # an endpoint that never ends (Server-Sent Events) cannot be a tool call
             # tool name = route function name: FastAPI's default operationId is
             # f"{name}{path}_{method}" with non-word characters replaced by "_"
             operation_id = op["operationId"]
@@ -68,6 +70,10 @@ def build_tools(app: FastAPI) -> dict[str, Tool]:
                 name = operation_id
             tools[name] = _tool(name, method.upper(), path, op, components)
     return tools
+
+
+def _is_stream(op: dict[str, Any]) -> bool:
+    return any("text/event-stream" in r.get("content", {}) for r in op.get("responses", {}).values())
 
 
 def _tool(name: str, method: str, path: str, op: dict[str, Any], components: dict[str, Any]) -> Tool:

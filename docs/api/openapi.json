@@ -89,6 +89,74 @@
         ]
       }
     },
+    "/api/v1/stats/overview": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Daily activity, credits, price position",
+        "description": "``daily``: one row per day of the period (zeros included). ``price_position``: per\nnon-reference competitor, over the associated pairs (auto_matched or validated, both\nproducts active) whose latest from prices are comparable: same currency, both the price of\none sales unit (unit basis, unit quantity 1 or unknown), tax modes not known to differ.\ngap = (competitor - antalis) / antalis * 100; ``same`` = |gap| < 1.",
+        "operationId": "overview_api_v1_stats_overview_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 366,
+              "minimum": 1,
+              "description": "period length, today included",
+              "default": 30,
+              "title": "Days"
+            },
+            "description": "period length, today included"
+          },
+          {
+            "name": "tz",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "time zone of the days (e.g. Europe/Paris)",
+              "default": "UTC",
+              "title": "Tz"
+            },
+            "description": "time zone of the days (e.g. Europe/Paris)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsOverview"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/competitors": {
       "get": {
         "tags": [
@@ -5752,6 +5820,36 @@
           }
         }
       }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Live console events (Server-Sent Events)",
+        "description": "Server-Sent Events (`text/event-stream`) for the console. Named events, JSON in `data:`:\n\n* `console.summary` (ConsoleSummary): sent on connect, then whenever any part changes.\n* `job.updated` (Job): any change of an active job (at most ~1/s per job), and job creation.\n* `job.finished` (Job): the job reached succeeded, partial, failed, cancelled or interrupted.\n* `notification.created` (Notification).\n* `matching.updated` (MatchingSummary): a competitor whose match counts changed.\n* `competitor.updated` (Competitor): worker state or sync timestamps changed.\n\nComment heartbeat `: ping` every 15 s, `retry: 3000`. Changes are detected by polling the\ndatabase every second: an event arrives up to ~1 s after the change. A client that cannot\nkeep up is disconnected (it reconnects and gets a fresh `console.summary`).",
+        "operationId": "events_api_v1_events_get",
+        "responses": {
+          "200": {
+            "description": "event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -7004,6 +7102,135 @@
         ],
         "title": "CompetitorStats"
       },
+      "CreditsOut": {
+        "properties": {
+          "monthly_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Limit",
+            "description": "Scrape.do monthly request quota"
+          },
+          "monthly_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Remaining"
+          },
+          "renews_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Renews At",
+            "description": "not given by Scrape.do: null"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "why the figures are null (no key, Scrape.do unavailable)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "monthly_limit",
+          "monthly_remaining",
+          "renews_at"
+        ],
+        "title": "CreditsOut"
+      },
+      "DailyStats": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "title": "Date",
+            "description": "YYYY-MM-DD in the requested time zone"
+          },
+          "observations": {
+            "type": "integer",
+            "title": "Observations",
+            "description": "price observations (tiers) captured"
+          },
+          "products_created": {
+            "type": "integer",
+            "title": "Products Created",
+            "description": "products first seen"
+          },
+          "products_marked_missing": {
+            "type": "integer",
+            "title": "Products Marked Missing",
+            "description": "products flagged missing by the catalog syncs finished that day"
+          },
+          "price_changes": {
+            "type": "integer",
+            "title": "Price Changes",
+            "description": "captures whose from price differs from the previous comparable capture"
+          },
+          "credits_used": {
+            "type": "integer",
+            "title": "Credits Used",
+            "description": "Scrape.do credits of the runs started that day"
+          },
+          "jobs_succeeded": {
+            "type": "integer",
+            "title": "Jobs Succeeded"
+          },
+          "jobs_failed": {
+            "type": "integer",
+            "title": "Jobs Failed"
+          },
+          "matches_auto": {
+            "type": "integer",
+            "title": "Matches Auto",
+            "description": "engine results that became auto_matched"
+          },
+          "matches_validated": {
+            "type": "integer",
+            "title": "Matches Validated"
+          },
+          "matches_rejected": {
+            "type": "integer",
+            "title": "Matches Rejected"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "observations",
+          "products_created",
+          "products_marked_missing",
+          "price_changes",
+          "credits_used",
+          "jobs_succeeded",
+          "jobs_failed",
+          "matches_auto",
+          "matches_validated",
+          "matches_rejected"
+        ],
+        "title": "DailyStats"
+      },
       "DifferenceOut": {
         "properties": {
           "kind": {
@@ -7753,6 +7980,37 @@
           "duration_seconds"
         ],
         "title": "JobOut"
+      },
+      "JobStatusTotals": {
+        "properties": {
+          "succeeded": {
+            "type": "integer",
+            "title": "Succeeded",
+            "default": 0
+          },
+          "partial": {
+            "type": "integer",
+            "title": "Partial",
+            "default": 0
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed",
+            "default": 0
+          },
+          "cancelled": {
+            "type": "integer",
+            "title": "Cancelled",
+            "default": 0
+          },
+          "interrupted": {
+            "type": "integer",
+            "title": "Interrupted",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "JobStatusTotals"
       },
       "LexicalOut": {
         "properties": {
@@ -9891,6 +10149,56 @@
         ],
         "title": "Page[RunOut]"
       },
+      "PricePosition": {
+        "properties": {
+          "competitor_key": {
+            "type": "string",
+            "title": "Competitor Key"
+          },
+          "pairs": {
+            "type": "integer",
+            "title": "Pairs",
+            "description": "associated pairs with a comparable latest from price on both sides"
+          },
+          "cheaper": {
+            "type": "integer",
+            "title": "Cheaper",
+            "description": "competitor price lower by 1 % or more"
+          },
+          "same": {
+            "type": "integer",
+            "title": "Same",
+            "description": "|gap| < 1 %"
+          },
+          "pricier": {
+            "type": "integer",
+            "title": "Pricier",
+            "description": "competitor price higher by 1 % or more"
+          },
+          "median_gap_percent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Gap Percent",
+            "description": "median of (competitor - antalis) / antalis * 100"
+          }
+        },
+        "type": "object",
+        "required": [
+          "competitor_key",
+          "pairs",
+          "cheaper",
+          "same",
+          "pricier",
+          "median_gap_percent"
+        ],
+        "title": "PricePosition"
+      },
       "PriceRefreshJobIn": {
         "properties": {
           "task": {
@@ -10074,6 +10382,34 @@
         "title": "PriceSummary",
         "description": "Latest capture of a product, summarized for lists."
       },
+      "PriceTrend": {
+        "properties": {
+          "previous_price": {
+            "type": "string",
+            "title": "Previous Price",
+            "description": "from price before the change"
+          },
+          "change_percent": {
+            "type": "number",
+            "title": "Change Percent",
+            "description": "(new - previous) / previous * 100, rounded to 2 decimals"
+          },
+          "changed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Changed At",
+            "description": "capture where the new price was first observed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "previous_price",
+          "change_percent",
+          "changed_at"
+        ],
+        "title": "PriceTrend",
+        "description": "Last change of the \"from\" price (first tier) between two captures with the same currency,\nunit basis and tax mode."
+      },
       "ProductAnalysisOut": {
         "properties": {
           "title": {
@@ -10234,6 +10570,18 @@
               }
             ],
             "title": "Normalized Attributes"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url",
+            "description": "first product image"
           }
         },
         "type": "object",
@@ -10580,6 +10928,17 @@
               }
             ]
           },
+          "price_trend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceTrend"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "last change of the from price; null if it never changed"
+          },
           "long_description": {
             "anyOf": [
               {
@@ -10673,6 +11032,7 @@
           "normalized_attributes",
           "images",
           "latest_price",
+          "price_trend",
           "long_description",
           "attributes",
           "extra",
@@ -10905,6 +11265,17 @@
                 "type": "null"
               }
             ]
+          },
+          "price_trend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceTrend"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "last change of the from price; null if it never changed"
           }
         },
         "type": "object",
@@ -10929,7 +11300,8 @@
           "description",
           "normalized_attributes",
           "images",
-          "latest_price"
+          "latest_price",
+          "price_trend"
         ],
         "title": "ProductListItem"
       },
@@ -11880,6 +12252,84 @@
           "unread_notifications"
         ],
         "title": "StatsOut"
+      },
+      "StatsOverview": {
+        "properties": {
+          "days": {
+            "type": "integer",
+            "title": "Days"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/DailyStats"
+            },
+            "type": "array",
+            "title": "Daily",
+            "description": "one row per day, oldest first, zeros included"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/StatsTotals"
+          },
+          "credits": {
+            "$ref": "#/components/schemas/CreditsOut",
+            "description": "Scrape.do quota, cached about 60 s"
+          },
+          "price_position": {
+            "items": {
+              "$ref": "#/components/schemas/PricePosition"
+            },
+            "type": "array",
+            "title": "Price Position",
+            "description": "per non-reference competitor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "days",
+          "daily",
+          "totals",
+          "credits",
+          "price_position"
+        ],
+        "title": "StatsOverview"
+      },
+      "StatsTotals": {
+        "properties": {
+          "observations": {
+            "type": "integer",
+            "title": "Observations"
+          },
+          "products_created": {
+            "type": "integer",
+            "title": "Products Created"
+          },
+          "credits_used": {
+            "type": "integer",
+            "title": "Credits Used"
+          },
+          "price_increases": {
+            "type": "integer",
+            "title": "Price Increases"
+          },
+          "price_decreases": {
+            "type": "integer",
+            "title": "Price Decreases"
+          },
+          "jobs": {
+            "$ref": "#/components/schemas/JobStatusTotals",
+            "description": "jobs finished over the period, by final status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "observations",
+          "products_created",
+          "credits_used",
+          "price_increases",
+          "price_decreases",
+          "jobs"
+        ],
+        "title": "StatsTotals"
       },
       "StepOut": {
         "properties": {

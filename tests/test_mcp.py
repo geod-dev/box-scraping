@@ -34,7 +34,8 @@ def offline_app():
 def test_every_route_is_a_tool(offline_app):
     tools = build_tools(offline_app)
     operations = [op for ops in offline_app.openapi()["paths"].values() for op in ops.values()]
-    assert len(tools) == len(operations)
+    assert len(tools) == len(operations) - 1  # every route but the event stream
+    assert "events" not in tools
     assert all(re.fullmatch(r"[a-z_]{1,64}", name) for name in tools)  # route function names, not operationIds
     assert {"list_products", "start_worker", "health"} <= set(tools)
 
