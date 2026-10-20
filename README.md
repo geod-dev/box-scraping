@@ -507,13 +507,12 @@ to tune with the validated/rejected decisions (query above).
   results, without deprecating anything.
 * `POST /api/v1/matching/products/{id}/reset` sends a match back to the engine.
 
-**Voyage AI quota**: the account currently has no payment method: Voyage then allows
-**3 requests / 10K tokens per minute** (the free tokens are not affected). The embedder paces
-its requests to these limits (`embedding.requests_per_minute` / `tokens_per_minute` in the
-config): ~100 tokens per product, i.e. **about 25 min for the Antalis catalog and ~1 h for
-6000 new products**, once; reruns only embed changed texts. Adding a payment method on
-dashboard.voyageai.com (the 200M free tokens stay free) raises the limits to 2000 RPM / 8M
-TPM: then set those values in the config.
+**Voyage AI quota**: the account has a payment method (the 200M free tokens stay free):
+Voyage allows **2000 requests / 8M tokens per minute** for `voyage-4`. The embedder paces its
+requests to these limits (`embedding.requests_per_minute` / `tokens_per_minute` in the
+config): ~100 tokens per product, so a full catalog is embedded in a few minutes at most;
+reruns only embed changed texts. Without a payment method Voyage drops to 3 RPM / 10K TPM
+(~1 h per 6000 new products): lower the config values accordingly.
 
 ---
 

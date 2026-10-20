@@ -15,12 +15,11 @@ embedding:
   batch_size: 128           # texts per API request (API limit: 1000)
   max_batch_tokens: 100000  # estimated tokens per request (API limit: 320K for voyage-4)
   max_description_chars: 1500
-  # Rate limits of the Voyage account; requests are paced to stay within them. Without a
-  # payment method on the account (free tokens only), Voyage allows 3 requests and 10K tokens
-  # per minute: ~10K tokens/min, i.e. about 1 hour per 6000 new products. With a payment
-  # method (the free tokens stay free): 2000 RPM / 8M TPM for voyage-4 -> set them here.
-  requests_per_minute: 3
-  tokens_per_minute: 10000
+  # Rate limits of the Voyage account; requests are paced to stay within them. The account has
+  # a payment method (the free tokens stay free): 2000 RPM / 8M TPM for voyage-4. Without one,
+  # Voyage only allows 3 RPM / 10K TPM (about 1 hour per 6000 new products).
+  requests_per_minute: 2000
+  tokens_per_minute: 8000000
 
 retrieval:
   # Candidates gathered by each signal before re-ranking (union, without duplicates).
