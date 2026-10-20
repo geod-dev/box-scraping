@@ -178,7 +178,7 @@ uv run catalog-scraper match --competitor packdiscount_fr [--mode incremental|de
   at every page. A pause holds the thread between two pages (state kept in memory).
 * Estimates (`services/estimates.py`) count requests from the last full catalog sync / the
   database / `estimate_hints` of the competitor config, and time per request from the
-  durations of previous runs (crawl delay + overhead otherwise).
+  durations of previous runs (otherwise the longer of the crawl delay and a typical request).
 * Notifications (`notifications` table) are written for each job event and for errors
   (bursts of failures, periodic digests of page errors, crashes).
 * **Retrying failed pages**: `POST /runs/{id}/retry-failed` queues a job that refetches only
@@ -545,12 +545,14 @@ reruns only embed changed texts. Without a payment method Voyage drops to 3 RPM 
 
 ### Rate limits
 
-* Antalis `robots.txt`: `Crawl-delay: 10` → `request_interval_seconds: 10` in the config
-  (one request at a time, at least 10 s between request starts, retries included).
-  `--request-interval` can override it for a run; keep it ≥ 10 s for routine crawls.
+* `request_interval_seconds` is the minimum time between request starts (one request at a
+  time, retries included): a request that took longer is followed at once, a faster one
+  waits for the rest. Antalis: 4 s (its `robots.txt` asks for `Crawl-delay: 10`; requests
+  come from rotating Scrape.do IPs). Packdiscount: 0.5 s (no crawl delay), so its pace is
+  the Scrape.do round trip. `--request-interval` can override it for a run.
 * Scrape.do account limits (from `/info`): 50 concurrent requests; the engine uses 1.
 * Cost: ~1 credit per page. A full Antalis packaging crawl is ≈ (listing pages + product
-  pages) credits; at 10 s/request, about 360 pages per hour.
+  pages) credits; at 4 s/request, about 900 pages per hour.
 
 ### Server deployment (Coolify)
 
@@ -662,7 +664,7 @@ See `docs/antalis-observations.md` for details.
 * The Antalis site has internal inconsistencies that are stored as-is (e.g. `Quantité sur
   palette` 1280 vs palette sales unit 540 for SKU 503623).
 * The crawl is sequential by design (crawl delay). A full sync of the packaging sector
-  takes hours (~7-8 h for Antalis): start it as a worker job.
+  takes hours (~3 h for Antalis): start it as a worker job.
 * A paused job is held in memory: a worker restart ends it `interrupted` (and the automatic
   resume restarts it running, not paused). Pauses have no time limit.
 * Resuming a catalog sync replays the category pages cached within `resume_within_hours`

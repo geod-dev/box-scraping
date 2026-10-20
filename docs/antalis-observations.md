@@ -17,7 +17,8 @@ Legend: **[confirmed]** seen in the responses; **[assumption]** inferred, not pr
   `Scrape.do-Resolved-Url`).
 * **[confirmed]** `robots.txt` asks every user agent for `Crawl-delay: 10` and disallows
   `?ns=` (sorting), `resultPage`, `.pdf`, `/ws/html/secure/`... The crawler only requests
-  category/listing/family/SKU pages and `?no=` pagination, and waits 10 s between requests.
+  category/listing/family/SKU pages and `?no=` pagination. It starts a request at most every
+  4 s (a deliberate choice below the crawl delay; requests come from rotating Scrape.do IPs).
 * **[confirmed]** Prices are visible to anonymous visitors, labelled "Prix H.T." (excluding
   VAT, `data-vat-rate="20.00"`), currency `EUR` (`data-currency`).
 * **[observed, environment]** From this workstation, the first TCP connection a new Python

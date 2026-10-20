@@ -8,8 +8,9 @@ from collections.abc import Callable
 class MinIntervalRateLimiter:
     """Guarantees a minimum delay between the *starts* of consecutive requests.
 
-    Used to honour a site's crawl-delay (Antalis' robots.txt asks for 10s). Thread-safe,
-    although the engine currently issues requests sequentially.
+    A request that took longer than the interval is followed at once; a faster one waits
+    for the rest of it. Thread-safe, although the engine currently issues requests
+    sequentially.
     """
 
     def __init__(

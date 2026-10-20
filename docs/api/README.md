@@ -145,9 +145,9 @@ Notes:
 * **Retry button** on a run with failed pages: `POST /runs/{id}/retry-failed` refetches only
   the failed pages of that run (409 `nothing_to_retry` when there is none). For a catalog
   run it also covers products that could not be created and failed category pages.
-* The crawl delay is imposed by the site (Antalis: 10 s between requests), so a full
-  Antalis catalog sync takes several hours (~2 700 requests ≈ 7-8 h); a price refresh of
-  ~2 200 products ≈ 6 h.
+* Requests are sequential with a minimum delay between request starts (Antalis: 4 s,
+  Packdiscount: 0.5 s), so a full Antalis catalog sync takes hours (~2 800 requests ≈ 3 h);
+  a price refresh of ~2 300 products ≈ 2.5 h.
 * `GET /health` → `worker.online` says whether the worker process is alive. When it is
   false, jobs can be queued but will not start: show a warning.
 

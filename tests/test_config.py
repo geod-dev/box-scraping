@@ -17,7 +17,7 @@ def test_repository_configs_load_and_adapters_resolve():
     configs = load_competitor_configs(DEFAULT_COMPETITOR_CONFIG_DIR)
     assert "antalis_fr" in configs
     antalis = configs["antalis_fr"]
-    assert antalis.request_interval_seconds >= 10  # robots.txt crawl-delay
+    assert antalis.request_interval_seconds >= 4
     assert antalis.scrapedo["render"] is False
     adapter = load_adapter(antalis)
     assert type(adapter).__name__ == "AntalisAdapter"

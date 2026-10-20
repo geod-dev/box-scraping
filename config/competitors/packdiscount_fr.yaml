@@ -16,8 +16,9 @@ root_urls:
   - https://api.packdiscount.com/INTERSHOP/rest/WFS/Packdiscount-FR-Site/rest/products?amount=200&offset=0
 
 # api.packdiscount.com/robots.txt: "Allow: /" and no Crawl-delay. The web robots.txt has no
-# Crawl-delay either. 2 s between requests is a choice, not a site requirement.
-request_interval_seconds: 2
+# Crawl-delay either. 0.5 s between request starts is a choice, not a site requirement; with
+# one request at a time the actual pace is bounded by the Scrape.do round trip.
+request_interval_seconds: 0.5
 max_attempts: 4
 default_currency: EUR
 

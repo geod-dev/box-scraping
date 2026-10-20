@@ -107,8 +107,9 @@ Legend: **[confirmed]** seen in the responses; **[assumption]** inferred, not pr
 * Listing calls: 1 root + ~120 category nodes + 7 flat-list pages + 1352 product checks
   (every flat-list item is classified) + ~1200 variation pages.
 * Variant calls: ~5 per family (one per variant, for the price): ~6000 in total.
-* Total ≈ **8 700 credits** and ≈ **8 700 requests**. At `request_interval_seconds: 2` that is
-  about 5 hours of sequential requests. The full run is expected to happen on the server.
+* Total ≈ **8 700 credits** and ≈ **8 700 requests**. The first full run on the server made
+  7 501 requests in 4 h 22 at `request_interval_seconds: 2` (2.1 s/request). The interval is
+  now 0.5 s, so the pace is bounded by the Scrape.do round trip instead.
 
 ## Local validation (2026-10-20)
 

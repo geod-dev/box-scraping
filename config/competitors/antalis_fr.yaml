@@ -10,8 +10,10 @@ enabled: true
 root_urls:
   - https://www.antalis.fr/eshop/packaging-machines-emballage
 
-# robots.txt of www.antalis.fr declares "Crawl-delay: 10" for all user agents: we honour it.
-request_interval_seconds: 10
+# Minimum time between request starts: a request that took longer is followed at once.
+# robots.txt of www.antalis.fr declares "Crawl-delay: 10" for all user agents; 4 s is a
+# deliberate choice (requests come from rotating Scrape.do IPs, 2 823 pages at 10 s saw no block).
+request_interval_seconds: 4
 max_attempts: 4
 default_currency: EUR
 

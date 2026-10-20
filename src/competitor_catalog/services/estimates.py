@@ -34,8 +34,9 @@ from competitor_catalog.db.models import (
 from competitor_catalog.matching.config import EmbeddingSettings, MatchingConfig
 from competitor_catalog.services.runs import utcnow
 
-# Measured overhead of one Scrape.do request on top of the crawl delay (no rendering).
-DEFAULT_REQUEST_OVERHEAD_SECONDS = 1.5
+# Measured duration of one Scrape.do request (no rendering). The crawl delay counts from
+# request start, so a request takes the longer of the two.
+DEFAULT_REQUEST_SECONDS = 1.5
 MIN_PAGES_FOR_MEASURE = 20
 # Product matching: one Voyage request per batch of texts (paced by the account's rate
 # limits), scoring is CPU-bound.
@@ -85,8 +86,11 @@ def seconds_per_request(session: Session, competitor_id: int, config: Competitor
     pages = sum(r.pages_fetched + r.pages_failed for r in rows)
     if pages:
         return seconds / pages, f"{seconds / pages:.1f}s/request measured over {len(rows)} previous run(s)"
-    value = config.request_interval_seconds + DEFAULT_REQUEST_OVERHEAD_SECONDS
-    return value, f"{value:.1f}s/request = crawl delay {config.request_interval_seconds:g}s + typical overhead"
+    value = max(config.request_interval_seconds, DEFAULT_REQUEST_SECONDS)
+    return value, (
+        f"{value:.1f}s/request = longer of crawl delay {config.request_interval_seconds:g}s "
+        f"and typical request time {DEFAULT_REQUEST_SECONDS:g}s"
+    )
 
 
 def credits_per_request(session: Session, competitor_id: int) -> float:
