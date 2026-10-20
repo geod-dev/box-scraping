@@ -114,15 +114,32 @@ def _tool(name: str, method: str, path: str, op: dict[str, Any], components: dic
         "title": summary,
         "description": description,
         "inputSchema": input_schema,
-        "annotations": {
-            "title": summary,
-            "readOnlyHint": method == "GET",
-            "destructiveHint": method == "DELETE",
-            "idempotentHint": method in ("GET", "PUT", "DELETE"),
-            "openWorldHint": False,
-        },
+        "annotations": _annotations(method, op, summary),
     }
     return Tool(method, path, tuple(path_params), other_params, body is not None, definition)
+
+
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+# HTTP idempotent methods, plus PATCH: the update bodies of this API set fields (no increment
+# or append), so sending the same one again changes nothing more
+IDEMPOTENT_METHODS = (*SAFE_METHODS, "PUT", "PATCH", "DELETE")
+
+
+def _annotations(method: str, op: dict[str, Any], title: str) -> dict[str, Any]:
+    """MCP behaviour hints, from the HTTP semantics of the operation (so a new route needs nothing)."""
+    read_only = method in SAFE_METHODS
+    success = min((int(code) for code in op.get("responses", {}) if code.isdigit() and code[0] == "2"), default=200)
+    # a POST answered 201 only adds a resource; any other write (update, delete, state change
+    # such as validate, cancel or start) may overwrite or remove existing data
+    creates = method == "POST" and success == 201
+    return {
+        "title": title,
+        "readOnlyHint": read_only,
+        "destructiveHint": not read_only and not creates,
+        "idempotentHint": method in IDEMPOTENT_METHODS,  # a POST is never assumed idempotent
+        # a call only reaches this API's database: scraping and embedding happen later, in the worker
+        "openWorldHint": False,
+    }
 
 
 _REF = "#/components/schemas/"

@@ -472,8 +472,11 @@ can list and call them directly.
 * Tools are generated from `openapi.json` at startup: one tool per endpoint, named after the
   route function (`list_products`, `start_worker`, `validate`...). The description starts
   with the method and path (`POST /api/v1/competitors/{key}/worker/start: ...`); path and query
-  parameters are top-level arguments, the JSON body goes in `body`. GET tools are annotated
-  read-only, DELETE tools destructive.
+  parameters are top-level arguments, the JSON body goes in `body`.
+* Each tool carries the MCP behaviour hints, derived from the HTTP method and success status:
+  GET is read-only; a POST answered 201 (creation) is additive; PATCH, DELETE and the other
+  POSTs (actions: start, cancel, validate...) are destructive; GET, PATCH and DELETE are
+  idempotent, POST never. `openWorldHint` is false: a call only touches the API's database.
 * A call is replayed in-process against the API itself with the same key: same validation,
   same errors. The result is the endpoint's JSON response, or `HTTP <status>: <error body>`
   with `isError: true`.

@@ -48,9 +48,18 @@ def test_every_route_is_a_tool(offline_app):
     start = tools["start_worker"].definition
     assert start["inputSchema"]["required"] == ["key", "body"]
     assert start["description"].startswith("POST /api/v1/competitors/{key}/worker/start")
-    assert start["annotations"]["readOnlyHint"] is False
-    assert tools["list_products"].definition["annotations"]["readOnlyHint"] is True
-    assert tools["delete_product"].definition["annotations"]["destructiveHint"] is True
+
+    def hints(name: str) -> tuple[bool, bool, bool]:
+        a = tools[name].definition["annotations"]
+        assert a["openWorldHint"] is False
+        return a["readOnlyHint"], a["destructiveHint"], a["idempotentHint"]
+
+    assert hints("list_products") == (True, False, True)
+    assert hints("create_product") == (False, False, False)  # POST 201: additive
+    assert hints("update_product") == (False, True, True)  # PATCH overwrites fields
+    assert hints("delete_product") == (False, True, True)
+    assert hints("start_worker") == (False, True, False)  # POST action
+    assert hints("mark_read") == (False, True, False)
 
 
 def test_protocol_and_auth(offline_app):
