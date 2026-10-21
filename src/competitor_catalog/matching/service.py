@@ -31,6 +31,7 @@ import numpy as np
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import (
     MATCH_ENGINE_STATUSES,
     MATCH_HUMAN_STATUSES,
@@ -101,12 +102,18 @@ class MatchingOptions:
     # Embed again the texts of this run even when cached (paid): only to change what a known
     # text's vector is, e.g. after a provider-side model update. Never needed for a rerun.
     reembed: bool = False
+    # Only the products of this category of the competitor and of its sub-categories.
+    category_id: int | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {list(MODES)}")
         if not isinstance(self.reembed, bool):
             raise ValueError("reembed must be a boolean")
+        if self.category_id is not None and (
+            isinstance(self.category_id, bool) or not isinstance(self.category_id, int)
+        ):
+            raise ValueError("category_id must be an integer")
 
 
 # --------------------------------------------------------------------------- eligibility
@@ -142,6 +149,15 @@ def eligible_products(competitor_id: int):
         Product.title.is_not(None),
         Product.details_updated_at.is_not(None),
     )
+
+
+def category_products(session: Session, competitor_id: int, category_id: int):
+    """Ids of the competitor's products in this category and its sub-categories (a select)."""
+    category = session.get(Category, category_id)
+    if category is None or category.competitor_id != competitor_id:
+        raise MatchingError("invalid_category", f"category #{category_id} is not a category of this competitor")
+    subtree = repo.category_subtree_ids(session, competitor_id, category_id)
+    return select(Product.id).where(Product.competitor_id == competitor_id, Product.category_id.in_(subtree))
 
 
 # --------------------------------------------------------------------------- loading
@@ -513,7 +529,15 @@ class MatchingRun:
                 m.product_id: (m.status, m.config_hash, m.reference_catalog_hash, m.revision)
                 for m in session.scalars(select(ProductMatch).where(ProductMatch.competitor_id == self.competitor_id))
             }
+            in_scope: set[int] | None = None
+            if self.options.category_id is not None:
+                in_scope = set(
+                    session.scalars(category_products(session, self.competitor_id, self.options.category_id))
+                )
         ref_hash = catalog_hash(reference_sources)
+        if in_scope is not None:
+            competitor_sources = [s for s in competitor_sources if s.product_id in in_scope]
+            self.counters["category_id"] = self.options.category_id
         selected = [s for s in competitor_sources if self._selected(current.get(s.product_id), config_hash, ref_hash)]
         self.counters["eligible_products"] = len(competitor_sources)
         self.counters["reference_products"] = len(reference_sources)
@@ -731,7 +755,9 @@ class MatchingRun:
             else f"Matching finished: {name}, nothing to review"
         )
         message = (
-            f"This run ({self.options.mode}): {processed} product(s) matched - "
+            f"This run ({self.options.mode}"
+            + (f", category #{self.options.category_id}" if self.options.category_id is not None else "")
+            + f"): {processed} product(s) matched - "
             f"{self.counters['auto_matched']} automatic, {self.counters['needs_review']} to review, "
             f"{self.counters['no_match']} without match"
             + (f", {self.counters['changed']} result(s) changed" if self.counters["changed"] else "")
@@ -749,6 +775,7 @@ class MatchingRun:
             job_id=self.job_id,
             data={
                 "mode": self.options.mode,
+                "category_id": self.options.category_id,
                 "needs_review": review,
                 "totals": totals,
                 "run": {**self.counters, **stats.as_dict()},

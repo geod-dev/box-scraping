@@ -53,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("catalog-sync", help="OPERATION A: discover categories/products and sync details + prices")
     s.add_argument("--competitor", required=True)
     s.add_argument("--root-url", action="append", help="crawl only from this URL (repeatable; partial scope)")
+    s.add_argument("--category", type=int, help="only this stored category (id) and its subtree (partial scope)")
     s.add_argument("--max-listing-pages", type=int, help="stop the listing crawl after N pages (partial scope)")
     s.add_argument("--max-products", type=int, help="only sync the first N discovered products (partial scope)")
     s.add_argument("--skip-products", action="store_true", help="only crawl categories and product URLs")
@@ -109,6 +110,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--reembed", action="store_true", help="embed the texts again even when cached (paid, normally never needed)"
     )
+    s.add_argument("--category", type=int, help="only the products of this category (id) and its sub-categories")
     s.set_defaults(func=cmd_match)
 
     s = sub.add_parser("worker", help="run migrations, then execute the jobs requested through the API")
@@ -187,6 +189,7 @@ def cmd_catalog_sync(args: argparse.Namespace, settings: Any) -> int:
     ctx = build_context(settings, args.competitor)
     options = CatalogSyncOptions(
         root_urls=args.root_url,
+        category_id=args.category,
         max_listing_pages=args.max_listing_pages,
         max_products=args.max_products,
         skip_products=args.skip_products,
@@ -234,7 +237,7 @@ def cmd_match(args: argparse.Namespace, settings: Any) -> int:
             ctx.factory,
             ctx.competitor_id,
             build_matching_runtime(settings),
-            MatchingOptions(args.mode, reembed=args.reembed),
+            MatchingOptions(args.mode, reembed=args.reembed, category_id=args.category),
             competitor_options=ctx.config.matching,
         ).run()
     except MatchingError as exc:

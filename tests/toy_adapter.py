@@ -56,6 +56,7 @@ class ToyAdapter(CompetitorAdapter):
             product_links=[ProductLink(url=p["url"], reference=p.get("ref")) for p in data.get("products", [])],
             next_page_url=data.get("next"),
             expected_item_count=data.get("expected"),
+            scoped_child_urls=data.get("scoped", []),
         )
 
     def _prices(self, data: dict[str, Any]) -> PriceSnapshot:

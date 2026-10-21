@@ -68,6 +68,12 @@ class PackdiscountAdapter(CompetitorAdapter):
     def product_list_url(offset: int = 0) -> str:
         return normalize_url(f"{API_ROOT}/products?amount={PAGE_SIZE}&offset={offset}")
 
+    @staticmethod
+    def category_products_url(category_url: str, offset: int = 0) -> str:
+        """Products (masters and simple products) of a category and its sub-categories."""
+        path = urlsplit(category_url).path.rstrip("/")
+        return normalize_url(f"https://{urlsplit(API_ROOT).netloc}{path}/products?amount={PAGE_SIZE}&offset={offset}")
+
     def normalize_url(self, url: str, base: str | None = None) -> str:
         normalized = super().normalize_url(url, base)
         parts = urlsplit(normalized)
@@ -197,6 +203,8 @@ class PackdiscountAdapter(CompetitorAdapter):
             url=page.final_url,
             category=CategoryData(url=self.root_category_url(), name=ROOT_NAME, kind="root"),
             child_category_urls=children,
+            # category pages list no product: a crawl of part of the tree reads their product lists
+            scoped_child_urls=[self.product_list_url()],
         )
 
     def _category(self, page: FetchedPage, data: dict[str, Any]) -> ListingPage:
@@ -213,7 +221,12 @@ class PackdiscountAdapter(CompetitorAdapter):
             ancestors=[self._root_ref(), *chain[:-1]],
         )
         children = [self._absolute(s["uri"]) for s in data.get("subCategories") or [] if s.get("uri")]
-        return ListingPage(url=page.final_url, category=category, child_category_urls=children)
+        return ListingPage(
+            url=page.final_url,
+            category=category,
+            child_category_urls=children,
+            scoped_child_urls=[self.category_products_url(node.url)],
+        )
 
     def _family(self, page: FetchedPage, data: dict[str, Any]) -> ListingPage:
         """A variation master: a family, not a sellable product. Its variants are the next page."""
@@ -245,14 +258,20 @@ class PackdiscountAdapter(CompetitorAdapter):
         return ListingPage(url=page.final_url, category=None, product_links=links, warnings=warnings)
 
     def _product_list(self, page: FetchedPage, data: dict[str, Any]) -> ListingPage:
-        """Flat product list: masters and simple products (variants are not listed here)."""
+        """Flat product list, or the product list of a category (``categories/<path>/products``):
+        masters and simple products (variants are not listed here). A small category list comes
+        without ``total``/``offset``: it is complete."""
         total = data.get("total")
         offset = int(data.get("offset") or 0)
         amount = int(data.get("amount") or PAGE_SIZE)
         children = [self.product_url(self._sku(e["uri"])) for e in data.get("elements", []) if e.get("uri")]
-        next_page = (
-            self.product_list_url(offset + amount) if total is not None and offset + amount < int(total) else None
-        )
+        path = urlsplit(page.final_url).path
+        if "/categories/" in path:
+            category_url = normalize_url(f"https://{urlsplit(page.final_url).netloc}{path.removesuffix('/products')}")
+            next_url = self.category_products_url(category_url, offset + amount)
+        else:
+            next_url = self.product_list_url(offset + amount)
+        next_page = next_url if total is not None and offset + amount < int(total) else None
         return ListingPage(
             url=page.final_url,
             category=None,

@@ -61,6 +61,13 @@ Legend: **[confirmed]** seen in the responses; **[assumption]** inferred, not pr
   children list is complete.
 * **[confirmed]** All 16 products of category `2/26` are in the flat list, which suggests the
   flat list is the complete product set (not verified for every category).
+* **[confirmed, 2026-10-21]** `categories/<id path>/products` lists the masters and simple
+  products of a category, sub-categories included (`categories/2/products`: `total` 64, pages
+  of `amount` 50 by default; `amount=200` accepted). A small list (`2/26`: 16 items) comes
+  without `total`/`offset`/`amount`. The full crawl does not use it (the flat list covers the
+  catalog); a crawl limited to one category does (`scoped_child_urls`), since category pages
+  list no product. Live check: a crawl rooted at `2/26` read its list and created family
+  `P00049` under it.
 
 ## Identifiers
 

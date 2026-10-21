@@ -94,6 +94,7 @@ All commands: `uv run catalog-scraper <command> --help`.
 uv run catalog-scraper catalog-sync --competitor antalis_fr                       # full scope
 uv run catalog-scraper catalog-sync --competitor antalis_fr --skip-products       # tree + product URLs only
 uv run catalog-scraper catalog-sync --competitor antalis_fr --root-url <category or family URL>   # subtree
+uv run catalog-scraper catalog-sync --competitor antalis_fr --category <category id>  # stored category + subtree
 uv run catalog-scraper catalog-sync --competitor antalis_fr --max-products 50     # sample
 ```
 
@@ -109,7 +110,7 @@ uv run catalog-scraper catalog-sync --competitor antalis_fr --max-products 50   
   is duplicated (DB unique constraints enforce it). Price observations are appended.
 * Scope: only categories whose own breadcrumb contains a root are stored/followed, so the
   crawl stays inside `packaging-machines-emballage`.
-* `--root-url`, `--max-products`, `--max-listing-pages`, `--skip-products` make the run
+* `--root-url`, `--category`, `--max-products`, `--max-listing-pages`, `--skip-products` make the run
   *partial scope*: such runs never flag anything as missing. Product URLs discovered but
   not synced (`--skip-products`, `--max-products`) are still recorded as `skipped` run items,
   and `scrape_runs.stats` holds `product_links_discovered` / `duplicate_product_links_ignored`.
@@ -118,6 +119,13 @@ uv run catalog-scraper catalog-sync --competitor antalis_fr --max-products 50   
   and the crawl continues. Only a fatal Scrape.do error (401: credits/token) stops the run.
   A listing that 404s, a category page without breadcrumb (scope undecidable) or a family
   whose announced item count is not reached also make the run `partial`.
+* A crawl that does not start from the configured roots (`--root-url`, `--category`, retry)
+  also reads the pages an adapter marks as `scoped_child_urls`: Packdiscount category pages
+  list no product (the full crawl reads a flat product list), so a category crawl reads
+  `categories/<path>/products` instead.
+* **Banned categories** (`banned_categories`, API `POST /categories/{id}/ban`) are never
+  crawled: their page, every page below them and every product whose category or navigation
+  path contains one are skipped (`skipped` run item, warning `in a banned category`).
 * Designed to be re-run periodically (e.g. every 6 months, from cron / a scheduler of
   your choice; none is bundled) to pick up new products and flag removed ones.
 
@@ -166,7 +174,7 @@ Exit code: `0` = run succeeded, `2` = run partial/failed (details in `scrape_run
 uv run catalog-scraper api       # migrations, then the HTTP API on :8000 (docs: /api/v1/docs)
 uv run catalog-scraper worker    # migrations, then executes the jobs requested through the API
 uv run catalog-scraper export-openapi   # regenerate docs/api/openapi.json after an API change
-uv run catalog-scraper match --competitor packdiscount_fr [--mode incremental|deprecated|all]
+uv run catalog-scraper match --competitor packdiscount_fr [--mode incremental|deprecated|all] [--category <id>]
 ```
 
 * A **job** = one task (`catalog_sync` = operation A, `price_refresh` = operation B,
@@ -296,6 +304,17 @@ the root whose value is the placeholder `HQ00000`), plus:
 
 Uniqueness: `UNIQUE(competitor_id, url)` and a partial unique index on
 `(competitor_id, external_id) WHERE external_id IS NOT NULL`. URL slugs are never used as ids.
+
+### `banned_categories` (excluded from scraping)
+Banning a category deletes it with its subtree (sub-categories, products, price history,
+matches; matches of other competitors that pointed to a deleted reference product become
+`deprecated`) and keeps only its own metadata here: `category_id` (the deleted id, plain),
+`name`, `slug`, `url` (`UNIQUE(competitor_id, url)`), `external_id`, `kind`, `depth`,
+`breadcrumb`, `details`, `parent_url`, `first_seen_at`, plus `reason`, `banned_by`,
+`banned_at` and `deleted` (counts per kind). Catalog syncs load these URLs / external ids
+and skip them (`services/catalog_sync.py`). Unbanning recreates the category empty (new id,
+same metadata, parent found again by `parent_url`) and deletes the row; a catalog sync with
+`category_id` then fills it (`services/category_bans.py`).
 
 ### `products` (one reference in one competitor catalog)
 `id`, `competitor_id`, `category_id` (most specific known category = Antalis product

@@ -70,6 +70,9 @@ class ListingPage:
     # Total number of items announced by the site for the whole listing (all pages);
     # used to detect incomplete pagination.
     expected_item_count: int | None = None
+    # Listing pages needed only by a crawl limited to part of the catalog (e.g. one category):
+    # the products of this category when the full crawl reaches them another way (a flat list).
+    scoped_child_urls: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 

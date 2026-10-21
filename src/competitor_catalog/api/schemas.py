@@ -85,6 +85,11 @@ class CatalogSyncOptionsIn(BaseModel):
         description="only the pages that failed in that catalog run: its failed product pages and failed listing "
         "pages with their sub-pages (no full crawl, never a full sync)",
     )
+    category_id: int | None = Field(
+        None,
+        description="only this stored category and its whole subtree (sub-categories, products), even when it is "
+        "empty (e.g. just unbanned); not combinable with root_urls / retry_failed_run_id. Never a full sync",
+    )
 
 
 class PriceRefreshOptionsIn(BaseModel):
@@ -132,6 +137,9 @@ class MatchingOptionsIn(BaseModel):
         description="false (default): every text already embedded (by any product of any competitor) reuses its "
         "cached vector, only new texts are sent to Voyage AI, whatever the mode. true: embed every text of the run "
         "again and replace the cached vectors (paid; normally never needed).",
+    )
+    category_id: int | None = Field(
+        None, description="only the products of this category of the competitor and of its sub-categories"
     )
 
 
@@ -225,6 +233,7 @@ class WorkerOut(BaseModel):
 
 class CompetitorStats(BaseModel):
     categories: int
+    banned_categories: int = Field(0, description="categories banned (deleted and skipped by the crawls)")
     products_active: int
     products_missing: int
     observations: int
@@ -331,6 +340,75 @@ class CategoryUpdate(BaseModel):
     breadcrumb: list[Any] | None = None
     details: dict[str, Any] | None = None
     status: LifecycleStatus | None = None
+
+
+class BanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(None, description="why it is banned (shown in the banned list)")
+    banned_by: str | None = Field(None, description="who banned it")
+
+
+class BannedCategoryOut(Orm):
+    id: int = Field(description="ban id (used to unban)")
+    competitor_id: int
+    competitor_key: str
+    category_id: int = Field(description="id the category had before the ban (it is a new id after unban)")
+    name: str
+    slug: str | None
+    url: str
+    external_id: str | None
+    kind: str | None
+    depth: int | None
+    breadcrumb: list[Any] | None
+    details: dict[str, Any]
+    parent_url: str | None
+    parent_category_id: int | None = Field(None, description="current id of its parent category, if it exists")
+    first_seen_at: datetime | None
+    reason: str | None
+    banned_by: str | None
+    banned_at: datetime
+    deleted: dict[str, int] = Field(
+        description="what the ban deleted: categories, products, observations, matches, matches_deprecated "
+        "(matches of other competitors that pointed to a deleted reference product)"
+    )
+
+
+class UnbanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scrape: bool = Field(
+        False,
+        description="also queue a catalog sync of the recreated category (refused as a whole, nothing unbanned, "
+        "if the competitor's worker is busy)",
+    )
+    unbanned_by: str | None = None
+
+
+class UnbanOut(BaseModel):
+    category: CategoryOut = Field(description="the recreated category (empty, new id)")
+    job: JobOut | None = Field(None, description="the catalog sync queued when scrape=true")
+
+
+class CategorySyncIn(BaseModel):
+    """Catalog sync of one category: its sub-categories and products, details and prices."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_products: int | None = Field(None, ge=0, description="only sync the first N products")
+    skip_products: bool = Field(False, description="only crawl sub-categories and product URLs")
+    resume_within_hours: float | None = Field(
+        48, ge=0, description="products synced less than N hours ago are not fetched again (0 = refetch all)"
+    )
+
+
+class CategoryMatchIn(BaseModel):
+    """Matching of the products of one category (and its sub-categories)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: MatchingMode = Field("incremental", description="same as POST /matching/competitors/{key}/run")
+    reembed: bool = False
 
 
 # --------------------------------------------------------------------------- prices

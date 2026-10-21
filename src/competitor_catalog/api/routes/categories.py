@@ -3,13 +3,15 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Body, Depends, Query, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from competitor_catalog.api import schemas, views
 from competitor_catalog.api.deps import (
     ApiError,
+    ConfigsDep,
+    MatchingDep,
     PageDep,
     SessionDep,
     competitor_id_filter,
@@ -17,9 +19,12 @@ from competitor_catalog.api.deps import (
     not_found,
     require_api_key,
 )
+from competitor_catalog.api.routes.competitors import refusal
 from competitor_catalog.core.urls import last_path_segment
 from competitor_catalog.db import repositories as repo
-from competitor_catalog.db.models import Category, Product
+from competitor_catalog.db.models import BannedCategory, Category, Competitor, Product
+from competitor_catalog.services import category_bans
+from competitor_catalog.services import jobs as job_service
 
 router = APIRouter(prefix="/categories", tags=["categories"], dependencies=[Depends(require_api_key)])
 
@@ -101,6 +106,111 @@ def category_tree(
     return [build(root, frozenset({root.id})) for root in children[None]]
 
 
+# --------------------------------------------------------------------------- banned categories
+
+
+def _ban(session, ban_id: int) -> BannedCategory:
+    ban = session.get(BannedCategory, ban_id)
+    if ban is None:
+        raise not_found("banned category", ban_id)
+    return ban
+
+
+def _banned_out(session, bans: list[BannedCategory]) -> list[schemas.BannedCategoryOut]:
+    keys = views.competitor_keys(session)
+    parents = {
+        (competitor_id, url): category_id
+        for category_id, competitor_id, url in session.execute(
+            select(Category.id, Category.competitor_id, Category.url).where(
+                Category.url.in_({b.parent_url for b in bans if b.parent_url})
+            )
+        )
+    }
+    return [
+        schemas.BannedCategoryOut.model_validate(
+            {
+                **{c.key: getattr(ban, c.key) for c in BannedCategory.__mapper__.column_attrs},
+                "competitor_key": keys.get(ban.competitor_id, "?"),
+                "parent_category_id": parents.get((ban.competitor_id, ban.parent_url)),
+            }
+        )
+        for ban in bans
+    ]
+
+
+@router.get(
+    "/banned", response_model=schemas.Page[schemas.BannedCategoryOut], summary="List banned categories, newest first"
+)
+def list_banned(
+    session: SessionDep,
+    page: PageDep,
+    competitor: Annotated[str | None, Query(description="competitor key")] = None,
+    q: Annotated[str | None, Query(description="search in name, external id, URL")] = None,
+):
+    stmt = select(BannedCategory).order_by(BannedCategory.banned_at.desc(), BannedCategory.id.desc())
+    competitor_id = competitor_id_filter(session, competitor)
+    if competitor_id is not None:
+        stmt = stmt.where(BannedCategory.competitor_id == competitor_id)
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            or_(BannedCategory.name.ilike(like), BannedCategory.external_id.ilike(like), BannedCategory.url.ilike(like))
+        )
+    result = page.page(session, stmt)
+    result["items"] = _banned_out(session, result["items"])
+    return result
+
+
+@router.get("/banned/{ban_id}", response_model=schemas.BannedCategoryOut, summary="One banned category")
+def get_banned(ban_id: int, session: SessionDep):
+    return _banned_out(session, [_ban(session, ban_id)])[0]
+
+
+@router.post(
+    "/banned/{ban_id}/unban",
+    response_model=schemas.UnbanOut,
+    summary="Unban a category: recreate it (empty), optionally queue its catalog sync",
+    responses={409: {"model": schemas.ErrorResponse}},
+)
+def unban(
+    ban_id: int,
+    session: SessionDep,
+    configs: ConfigsDep,
+    matching: MatchingDep,
+    body: Annotated[schemas.UnbanIn, Body(examples=[{}, {"scrape": True}])] = None,
+):
+    """The category is recreated with its saved metadata (name, URL, external id, kind, parent)
+    under a **new id**, without sub-categories nor products: they come back with a catalog sync of
+    the category (``scrape: true``, or ``POST /categories/{id}/scrape`` later) or the next full
+    sync. With ``scrape: true`` the unban is refused as a whole when the sync cannot be queued
+    (``worker_busy``, ``competitor_disabled``...)."""
+    body = body or schemas.UnbanIn()
+    ban = _ban(session, ban_id)
+    competitor = session.get(Competitor, ban.competitor_id)
+    category = category_bans.unban_category(session, ban, unbanned_by=body.unbanned_by)
+    job = None
+    if body.scrape:
+        job = _enqueue(session, competitor, configs, matching, "catalog_sync", {"category_id": category.id})
+    _commit(session)
+    return schemas.UnbanOut(
+        category=schemas.CategoryOut.model_validate(category), job=views.job_out(job, competitor.key) if job else None
+    )
+
+
+def _enqueue(session, competitor: Competitor, configs, matching, task: str, options: dict):
+    config = configs.get(competitor.key)
+    if config is None:
+        session.rollback()
+        raise ApiError(409, "competitor_not_configured", f"no configuration file for {competitor.key}")
+    try:
+        return job_service.enqueue_job(
+            session, competitor, config, task, options, requested_by="api", matching=matching
+        )
+    except job_service.JobRequestError as exc:
+        session.rollback()
+        raise refusal(exc) from None
+
+
 @router.get("/{category_id}", response_model=schemas.CategoryDetailOut, summary="One category with its path")
 def get_category(category_id: int, session: SessionDep):
     category = _category(session, category_id)
@@ -151,6 +261,98 @@ def delete_category(category_id: int, session: SessionDep):
     session.delete(_category(session, category_id))
     session.commit()
     return Response(status_code=204)
+
+
+@router.post(
+    "/{category_id}/ban",
+    response_model=schemas.BannedCategoryOut,
+    status_code=201,
+    summary="Ban a category: delete it with its subtree and skip it in every crawl",
+    responses={409: {"model": schemas.ErrorResponse}},
+)
+def ban(
+    category_id: int,
+    session: SessionDep,
+    matching: MatchingDep,
+    body: Annotated[schemas.BanIn, Body(examples=[{}, {"reason": "not our market", "banned_by": "alice"}])] = None,
+):
+    """Deletes the category, all its sub-categories, their products with their price history,
+    their matches and match history. Matches of other competitors associated with a deleted
+    (reference) product become ``deprecated``. Only the category's own metadata is kept (the
+    returned ban), to recreate it with ``POST /categories/banned/{ban_id}/unban``. Catalog syncs
+    skip the category, every page below it and every product whose navigation path contains it.
+
+    Refusals (HTTP 409): ``worker_busy`` (the competitor has an active job), ``matching_running``
+    (a category of the reference catalog while a matching job runs)."""
+    body = body or schemas.BanIn()
+    category = _category(session, category_id)
+    try:
+        banned = category_bans.ban_category(
+            session,
+            category,
+            reason=body.reason,
+            banned_by=body.banned_by,
+            reference_key=matching.config.reference_competitor,
+        )
+    except category_bans.BanError as exc:
+        session.rollback()
+        raise ApiError(409, exc.code, exc.message, {"job_id": exc.job_id}) from None
+    session.commit()
+    return _banned_out(session, [banned])[0]
+
+
+@router.post(
+    "/{category_id}/scrape",
+    response_model=schemas.JobOut,
+    status_code=202,
+    summary="Catalog sync of this category only (sub-categories, products, prices)",
+    responses={409: {"model": schemas.ErrorResponse}, 422: {"model": schemas.ErrorResponse}},
+)
+def scrape(
+    category_id: int,
+    session: SessionDep,
+    configs: ConfigsDep,
+    matching: MatchingDep,
+    body: Annotated[schemas.CategorySyncIn, Body(examples=[{}, {"max_products": 10}])] = None,
+):
+    """Queues a ``catalog_sync`` job with ``options.category_id``: the crawl starts from the
+    category's URL and follows its whole subtree, even when the category is empty in the
+    database (e.g. just unbanned). Banned sub-categories stay skipped. Never a full sync: nothing
+    is flagged missing. Same refusals as ``POST /competitors/{key}/worker/start``."""
+    body = body or schemas.CategorySyncIn()
+    category = _category(session, category_id)
+    competitor = session.get(Competitor, category.competitor_id)
+    options = {**body.model_dump(), "category_id": category.id}
+    job = _enqueue(session, competitor, configs, matching, "catalog_sync", options)
+    session.commit()
+    return views.job_out(job, competitor.key)
+
+
+@router.post(
+    "/{category_id}/match",
+    response_model=schemas.JobOut,
+    status_code=202,
+    summary="Match the products of this category only",
+    responses={409: {"model": schemas.ErrorResponse}, 422: {"model": schemas.ErrorResponse}},
+)
+def match(
+    category_id: int,
+    session: SessionDep,
+    configs: ConfigsDep,
+    matching: MatchingDep,
+    body: Annotated[schemas.CategoryMatchIn, Body(examples=[{}, {"mode": "all"}])] = None,
+):
+    """Queues a ``matching`` job with ``options.category_id``: only the competitor's products
+    of this category and its sub-categories are (re)matched, against the whole reference
+    catalog. Same refusals as ``POST /matching/competitors/{key}/run`` (a category of the
+    reference catalog itself is refused with ``matching_reference``)."""
+    body = body or schemas.CategoryMatchIn()
+    category = _category(session, category_id)
+    competitor = session.get(Competitor, category.competitor_id)
+    options = {**body.model_dump(), "category_id": category.id}
+    job = _enqueue(session, competitor, configs, matching, "matching", options)
+    session.commit()
+    return views.job_out(job, competitor.key)
 
 
 def _check_parent(session, category: Category, parent_id: int | None) -> None:

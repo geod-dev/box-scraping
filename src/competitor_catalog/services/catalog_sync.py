@@ -18,6 +18,15 @@ crawl, completeness checks and missing-flagging work exactly as for a fresh craw
 ``retry_failed_run_id`` replaces the full crawl by the pages that failed in a previous run:
 its failed product pages, and its failed listing pages (crawled again with their subtree,
 whose products were never discovered). Such a run is never full scope.
+
+``category_id`` crawls one stored category (even empty, e.g. just unbanned) with its whole
+subtree. A crawl that does not start from the configured roots also reads the listing pages
+the adapter marks as ``scoped_child_urls`` (a category's own product list when the full crawl
+reaches products through a flat list instead).
+
+Banned categories (``banned_categories``) are never crawled: a listing page of a banned
+category, or below one, is skipped without fetching its children, and a product whose
+category or navigation path is banned is not stored.
 """
 
 from __future__ import annotations
@@ -60,11 +69,18 @@ class CatalogSyncOptions:
     allow_mass_missing: bool = False
     # Only the pages that failed in that run of the same competitor (no full crawl).
     retry_failed_run_id: int | None = None
+    # Only this stored category and its subtree (crawled from its URL).
+    category_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.category_id is not None and (self.root_urls or self.retry_failed_run_id is not None):
+            raise ValueError("category_id cannot be combined with root_urls or retry_failed_run_id")
 
     @property
     def is_full_scope(self) -> bool:
         return (
             self.root_urls is None
+            and self.category_id is None
             and self.max_listing_pages is None
             and self.max_products is None
             and not self.skip_products
@@ -97,17 +113,22 @@ class CatalogSync:
         self.competitor_id = competitor_id
         self.observer = observer or RunObserver()
         self._replayable: set[str] = set()
+        self._banned = repo.BannedScope()
 
     def run(self, options: CatalogSyncOptions | None = None) -> CatalogSyncResult:
         options = options or CatalogSyncOptions()
         retry_products: list[str] = []
-        if options.retry_failed_run_id is not None:
-            with transaction(self.factory) as session:
+        configured = [self.adapter.normalize_url(u) for u in self.adapter.config.root_urls]
+        with transaction(self.factory) as session:
+            self._banned = repo.banned_scope(session, self.competitor_id)
+            if options.retry_failed_run_id is not None:
                 roots, retry_products = repo.failed_catalog_urls(
                     session, self.competitor_id, options.retry_failed_run_id
                 )
-        else:
-            roots = [self.adapter.normalize_url(u) for u in (options.root_urls or self.adapter.config.root_urls)]
+            elif options.category_id is not None:
+                roots = [repo.category_url(session, self.competitor_id, options.category_id)]
+            else:
+                roots = [self.adapter.normalize_url(u) for u in options.root_urls] if options.root_urls else configured
         tracker = RunTracker(self.factory, self.competitor_id, "catalog_discovery", self.observer)
         params: dict[str, Any] = {
             "root_urls": roots,
@@ -115,11 +136,13 @@ class CatalogSync:
             "max_products": options.max_products,
             "skip_products": options.skip_products,
             "retry_failed_run_id": options.retry_failed_run_id,
+            "category_id": options.category_id,
         }
         run_id = tracker.start(params, full_scope=options.is_full_scope)
         self._prepare_replay(options)
         # Retried listing pages are not crawl roots: one failing again is a failed page, not a fatal error.
         state = _CrawlState(roots=roots, critical_roots=options.retry_failed_run_id is None)
+        state.scoped = set(roots) != set(configured)
         for url in retry_products:
             state.add_product(ProductLink(url=url))
         status, error = "failed", None
@@ -250,6 +273,9 @@ class CatalogSync:
                     item_type="listing_page", url=url, status="skipped", warnings=["outside the crawl scope"]
                 )
                 return
+            if self._banned.covers(category.url, category.external_id, ancestors):
+                self._skip_banned(tracker, url, "listing_page")
+                return
             with transaction(self.factory) as session:
                 cat, _ = repo.upsert_category(
                     session, self.competitor_id, category, run_id=tracker.run_id, now=utcnow()
@@ -274,6 +300,15 @@ class CatalogSync:
         owner = continuation_of or (category.url if category else url)
         for child in listing.child_category_urls:
             state.count_item(owner, child)
+            if child in self._banned.urls:
+                if child not in queued:
+                    queued.add(child)
+                    self._skip_banned(tracker, child, "listing_page")
+                continue
+            if child not in queued:
+                queued.add(child)
+                queue.append(child)
+        for child in listing.scoped_child_urls if state.scoped else ():
             if child not in queued:
                 queued.add(child)
                 queue.append(child)
@@ -341,6 +376,9 @@ class CatalogSync:
             self._page_failed(tracker, state, link.url, exc, item_type="product")
             tracker.bump(products_failed=1)
             return None
+        if self._banned.covers_product(data):
+            self._skip_banned(tracker, link.url, "product")
+            return data.catalog_reference
         warnings = list(data.warnings)
         if link.reference and data.catalog_reference and link.reference != data.catalog_reference:
             warnings.append(f"listing announced reference {link.reference}, page shows {data.catalog_reference}")
@@ -433,6 +471,11 @@ class CatalogSync:
             )
         tracker.bump(products_seen=1)
         tracker.stats["products_resumed"] = tracker.stats.get("products_resumed", 0) + 1
+
+    def _skip_banned(self, tracker: RunTracker, url: str, item_type: str) -> None:
+        tracker.add_item_tx(item_type=item_type, url=url, status="skipped", warnings=["in a banned category"])
+        key = f"banned_{item_type}s_skipped"
+        tracker.stats[key] = tracker.stats.get(key, 0) + 1
 
     # ------------------------------------------------------------------ listing page cache
     def _prepare_replay(self, options: CatalogSyncOptions) -> None:
@@ -540,6 +583,7 @@ class _CrawlState:
     def __init__(self, roots: list[str], *, critical_roots: bool = True):
         self.roots = set(roots)
         self.critical_roots = critical_roots  # a failing root aborts the run
+        self.scoped = False  # not the configured roots: also crawl the adapter's scoped_child_urls
         self.root_canonicals: set[str] = set(roots)
         self.category_urls: list[str] = []
         self.product_links: dict[str, ProductLink] = {}

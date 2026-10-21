@@ -144,6 +144,40 @@ class Category(TimestampMixin, Base):
     parent: Mapped[Category | None] = relationship(remote_side="Category.id")
 
 
+class BannedCategory(Base):
+    """A category deleted (with its sub-categories, products, prices and matches) and excluded
+    from scraping. Only its own metadata is kept, enough to recreate it (empty) on unban."""
+
+    __tablename__ = "banned_categories"
+    __table_comment__ = "Categories excluded from scraping; their own metadata is kept to recreate them on unban"
+    __table_args__ = (
+        UniqueConstraint("competitor_id", "url", name="uq_banned_categories_competitor_url"),
+        Index("ix_banned_categories_competitor_external_id", "competitor_id", "external_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    category_id: Mapped[int] = mapped_column(
+        BigInteger, comment="id of the deleted category (plain id: the row no longer exists)"
+    )
+    name: Mapped[str] = mapped_column(Text)
+    slug: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str] = mapped_column(Text, comment="canonical URL: crawls skip it and every page below it")
+    external_id: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str | None] = mapped_column(Text)
+    depth: Mapped[int | None] = mapped_column(Integer)
+    breadcrumb: Mapped[list[Any] | None] = mapped_column(NullableJSONB)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    parent_url: Mapped[str | None] = mapped_column(Text, comment="URL of the parent, to link it again on unban")
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(Text)
+    banned_by: Mapped[str | None] = mapped_column(Text)
+    banned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    deleted: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb"), comment="what the ban deleted (counts per kind)"
+    )
+
+
 class Product(TimestampMixin, Base):
     __tablename__ = "products"
     __table_comment__ = "One product/reference in one competitor catalog (never shared across competitors)"

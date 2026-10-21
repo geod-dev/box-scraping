@@ -165,6 +165,8 @@ def estimate_job(
             estimate.seconds = round(estimate.requests * spr)
             estimate.credits = round(estimate.requests * credits_per_request(session, competitor_id))
             return estimate
+        if options.get("category_id") is not None:
+            return _estimate_category_sync(session, competitor_id, options, estimate, spr)
         pages, basis = listing_pages_estimate(session, competitor_id, config)
         if options.get("max_listing_pages") and pages:
             pages = min(pages, int(options["max_listing_pages"]))
@@ -227,6 +229,35 @@ def estimate_job(
     return estimate
 
 
+def _estimate_category_sync(
+    session: Session, competitor_id: int, options: dict[str, Any], estimate: Estimate, spr: float
+) -> Estimate:
+    """Catalog sync of one category: its known subtree (an unbanned category is empty: unknown)."""
+    category_id = int(options["category_id"])
+    subtree = repo.category_subtree_ids(session, competitor_id, category_id)
+    estimate.listing_pages = max(1, len(subtree))
+    products = session.scalar(
+        select(func.count()).select_from(Product).where(Product.category_id.in_(subtree), Product.status == "active")
+    )
+    plural = "category" if len(subtree) == 1 else "categories"
+    estimate.basis.append(f"category #{category_id}: {len(subtree)} known {plural} in its subtree")
+    if options.get("skip_products"):
+        estimate.products = 0
+        estimate.basis.append("products not synced (skip_products)")
+    elif products:
+        estimate.products = products
+        if options.get("max_products") is not None:
+            estimate.products = min(products, int(options["max_products"]))
+        estimate.basis.append(f"{products} active products known in the category")
+    else:
+        estimate.basis.append("no product known in the category (empty or just unbanned): size unknown until crawled")
+    if estimate.products is not None:
+        estimate.requests = estimate.listing_pages + estimate.products
+        estimate.seconds = round(estimate.requests * spr)
+        estimate.credits = round(estimate.requests * credits_per_request(session, competitor_id))
+    return estimate
+
+
 def estimate_matching(
     session: Session,
     competitor_id: int,
@@ -239,13 +270,19 @@ def estimate_matching(
     mode = options.get("mode", "incremental")
     eligible = eligible_products(competitor_id)
     rows = select(ProductMatch.product_id).where(ProductMatch.competitor_id == competitor_id)
+    scope_basis = []
+    if options.get("category_id") is not None:
+        subtree = repo.category_subtree_ids(session, competitor_id, int(options["category_id"]))
+        eligible = eligible.where(Product.category_id.in_(subtree))
+        rows = rows.where(ProductMatch.product_id.in_(select(Product.id).where(Product.category_id.in_(subtree))))
+        scope_basis = [f"only category #{options['category_id']} and its {len(subtree) - 1} sub-category(ies)"]
 
     def count(stmt) -> int:
         return session.scalar(select(func.count()).select_from(stmt.subquery()))
 
     deprecated = count(rows.where(ProductMatch.status == "deprecated"))
     never = count(eligible.where(Product.id.not_in(rows)))
-    basis = [f"{deprecated} deprecated match(es)"]
+    basis = [*scope_basis, f"{deprecated} deprecated match(es)"]
     if mode == "deprecated":
         products = deprecated
     elif mode == "all":

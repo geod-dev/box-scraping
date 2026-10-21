@@ -9,6 +9,7 @@ import re
 import uuid
 import zlib
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -21,6 +22,7 @@ from competitor_catalog.core.config import CompetitorConfig
 from competitor_catalog.core.types import CategoryData, CategoryRef, PriceSnapshot, ProductData
 from competitor_catalog.core.urls import last_path_segment
 from competitor_catalog.db.models import (
+    BannedCategory,
     Category,
     Competitor,
     ListingPageCache,
@@ -143,6 +145,40 @@ def category_subtree_ids(session: Session, competitor_id: int, root_id: int) -> 
         {"root": root_id, "cid": competitor_id},
     )
     return [r[0] for r in rows]
+
+
+def category_url(session: Session, competitor_id: int, category_id: int) -> str:
+    category = session.get(Category, category_id)
+    if category is None or category.competitor_id != competitor_id:
+        raise ValueError(f"category #{category_id} is not a category of this competitor")
+    return category.url
+
+
+@dataclass
+class BannedScope:
+    """URLs / external ids of a competitor's banned categories, as the crawls check them."""
+
+    urls: set[str] = field(default_factory=set)
+    external_ids: set[str] = field(default_factory=set)
+
+    def covers(self, url: str | None, external_id: str | None, ancestor_urls: Iterable[str | None] = ()) -> bool:
+        """The category is banned, or lies below a banned category."""
+        return (
+            url in self.urls
+            or (external_id is not None and external_id in self.external_ids)
+            or any(u in self.urls for u in ancestor_urls)
+        )
+
+    def covers_product(self, data: ProductData) -> bool:
+        refs = [data.category, *data.breadcrumb]
+        return any(ref is not None and self.covers(ref.url, ref.external_id) for ref in refs)
+
+
+def banned_scope(session: Session, competitor_id: int) -> BannedScope:
+    rows = session.execute(
+        select(BannedCategory.url, BannedCategory.external_id).where(BannedCategory.competitor_id == competitor_id)
+    ).all()
+    return BannedScope({url for url, _ in rows}, {ext for _, ext in rows if ext})
 
 
 def find_category_by_any(session: Session, competitor_id: int, key: str) -> Category | None:

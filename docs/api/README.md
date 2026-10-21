@@ -222,6 +222,48 @@ All of them have list/get/create/update/delete endpoints (runs and run items: re
 delete only; they are written by the worker). Deleting a product deletes its price history.
 Manual edits may be overwritten by the next catalog sync (the site is the source of truth).
 
+### Banned categories, category syncs and category matchings
+
+A category that is not wanted (out of scope, not our market...) is **banned**, not deleted:
+a plain `DELETE /categories/{id}` comes back with the next catalog sync, a ban does not.
+
+* `POST /categories/{id}/ban` (`{"reason"?, "banned_by"?}`, 201): deletes the category, all
+  its sub-categories, their products with their price history, their matches and match
+  history. Matches of other competitors associated with (or proposing) a deleted product
+  (banning an Antalis category) become `deprecated` with `antalis_product_deleted`. Returns
+  the ban (`BannedCategory`): the category's own metadata (`name`, `url`, `external_id`,
+  `kind`, `depth`, `breadcrumb`, `details`, `parent_url`, `parent_category_id` = current id of
+  its parent if it exists, `category_id` = the id it had), `reason`, `banned_by`,
+  `banned_at`, and `deleted` = `{categories, products, observations, matches,
+  matches_deprecated}`. Refused (409) with `worker_busy` while the competitor has an active
+  job, and with `matching_running` for an Antalis category while any matching job is active.
+* From then on every catalog sync skips it: its page, every page below it (even reached
+  through another path) and every product whose category or navigation path contains it
+  (run items `skipped` with the warning `in a banned category`; run `stats.banned_listing_pages_skipped`,
+  `stats.banned_products_skipped`). A banned sub-category of an unbanned category stays banned.
+* `GET /categories/banned` (`competitor`, `q`, paginated, newest first) and
+  `GET /categories/banned/{ban_id}`. `competitor.stats.banned_categories` counts them. Banned
+  categories are not in `GET /categories` nor in the tree: to show them in a tree, place them
+  under `parent_category_id`.
+* `POST /categories/banned/{ban_id}/unban` (`{"scrape"?: false, "unbanned_by"?}`): recreates
+  the category **empty**, under a **new id**, with the saved metadata and its parent, and
+  forgets the ban. Returns `{"category": Category, "job": Job | null}`. With `"scrape": true`
+  a catalog sync of the category is queued in the same call; if it cannot be queued
+  (`worker_busy`...) nothing is unbanned (409).
+* `POST /categories/{id}/scrape` (`{"max_products"?, "skip_products"?, "resume_within_hours"?}`,
+  202, a `Job`): catalog sync of **this category only**: the crawl starts from its URL and
+  follows its whole subtree (sub-categories, products, details, prices), even when it is
+  empty in the database. Same as `worker/start` with `{"task": "catalog_sync", "options":
+  {"category_id": <id>}}`; same refusals (`worker_busy`...). It is never a full sync: nothing
+  is flagged missing and `last_full_catalog_at` does not change. Its estimate counts the
+  category's known subtree; for an empty category the size is unknown (`products: null`).
+* `POST /categories/{id}/match` (`{"mode"?, "reembed"?}`, 202, a `Job`): matching of the
+  competitor's products of this category and its sub-categories only, against the whole
+  reference catalog. Same as `POST /matching/competitors/{key}/run` with `category_id`; a
+  category of the reference catalog is refused (`matching_reference`).
+
+Jobs started this way carry `options.category_id`: show the category name next to the job.
+
 ### Notifications
 
 Saved in the database, read/unread. Created by the worker for every job event and error:
@@ -242,6 +284,8 @@ Saved in the database, read/unread. Created by the worker for every job event an
 | `job_auto_resumed` | info | an interrupted job was restarted automatically after a worker restart (`data.resumed_from_job_id`) |
 | `job_auto_resume_stopped` | error | not restarted automatically: interrupted 3 times in a row after automatic restarts (crash loop?) |
 | `matches_deprecated` | warning | matches became obsolete because a product changed (`data.count`, `data.by_reason`, `data.by_previous_status`, `data.matches[]`: match/product ids, title, previous status, reason) |
+| `category_banned` | warning | a category was banned (`data.ban_id`, `data.category_id`, `data.url`, `data.deleted` counts) |
+| `category_unbanned` | info | a banned category was recreated (`data.category_id` = its new id, `data.url`) |
 
 Each notification: `id`, `created_at`, `level`, `kind`, `title`, `message`,
 `competitor_id`, `job_id`, `scrape_run_id`, `data`, `read_at`, `read`. Endpoints: list
@@ -511,6 +555,12 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | GET/POST | `/categories` | list/search (`competitor`, `parent_id`, `roots`, `status`, `kind`, `q`) / create |
 | GET | `/categories/tree` | nested tree (`competitor` required) |
 | GET/PATCH/DELETE | `/categories/{id}` | one category (with `path`, counts) / update / delete |
+| POST | `/categories/{id}/ban` | ban: delete it with its subtree, skip it in every crawl |
+| POST | `/categories/{id}/scrape` | catalog sync of this category only |
+| POST | `/categories/{id}/match` | matching of this category's products only |
+| GET | `/categories/banned` | banned categories (`competitor`, `q`) |
+| GET | `/categories/banned/{ban_id}` | one banned category |
+| POST | `/categories/banned/{ban_id}/unban` | recreate it empty (`{"scrape": true}`: and queue its sync) |
 | GET/POST | `/products` | search / create |
 | GET | `/products/facets` | filter values with counts |
 | GET | `/products/by-reference/{competitor}/{reference}` | lookup by reference |
@@ -556,6 +606,7 @@ All paths are relative to `/api/v1`. Request/response details: `openapi.json`.
 | `skip_products` | false | only crawl categories and product links |
 | `allow_mass_missing` / `max_missing_ratio` | false / 0.2 | safety threshold for flagging products missing |
 | `retry_failed_run_id` | none | only the pages that failed in that catalog run (partial scope); `POST /runs/{id}/retry-failed` sets it for you |
+| `category_id` | none | only this category and its subtree (partial scope); `POST /categories/{id}/scrape` sets it for you |
 
 A catalog sync with partial-scope options never updates `last_full_catalog_at` and never
 flags anything missing.
@@ -573,4 +624,5 @@ flags anything missing.
 | `limit` | at most N products |
 
 `matching`: `mode` = `incremental` (default) | `deprecated` | `all`, `reembed` = `false`
-(default: cached embeddings reused) | `true` (see [Product matching](#product-matching)).
+(default: cached embeddings reused) | `true` (see [Product matching](#product-matching)),
+`category_id` = only the products of this category and its sub-categories.

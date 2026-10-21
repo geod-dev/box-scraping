@@ -14,6 +14,7 @@ from competitor_catalog.api import schemas
 from competitor_catalog.core.config import CompetitorConfig
 from competitor_catalog.db.models import (
     JOB_ACTIVE_STATUSES,
+    BannedCategory,
     Category,
     Competitor,
     Notification,
@@ -120,8 +121,12 @@ def competitor_stats(session: Session, competitor_id: int) -> schemas.Competitor
         .join(Product, Product.id == ScrapeObservation.product_id)
         .where(Product.competitor_id == competitor_id)
     ).one()
+    banned = session.scalar(
+        select(func.count()).select_from(BannedCategory).where(BannedCategory.competitor_id == competitor_id)
+    )
     return schemas.CompetitorStats(
         categories=categories,
+        banned_categories=banned,
         products_active=rows.get("active", 0),
         products_missing=rows.get("missing", 0),
         observations=observations,

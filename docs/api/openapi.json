@@ -1438,6 +1438,236 @@
         }
       }
     },
+    "/api/v1/categories/banned": {
+      "get": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "List banned categories, newest first",
+        "operationId": "list_banned_api_v1_categories_banned_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "competitor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor key",
+              "title": "Competitor"
+            },
+            "description": "competitor key"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "search in name, external id, URL",
+              "title": "Q"
+            },
+            "description": "search in name, external id, URL"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "page size",
+              "default": 50,
+              "title": "Limit"
+            },
+            "description": "page size"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "number of items to skip",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "number of items to skip"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_BannedCategoryOut_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/categories/banned/{ban_id}": {
+      "get": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "One banned category",
+        "operationId": "get_banned_api_v1_categories_banned__ban_id__get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ban_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Ban Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BannedCategoryOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/categories/banned/{ban_id}/unban": {
+      "post": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "Unban a category: recreate it (empty), optionally queue its catalog sync",
+        "description": "The category is recreated with its saved metadata (name, URL, external id, kind, parent)\nunder a **new id**, without sub-categories nor products: they come back with a catalog sync of\nthe category (``scrape: true``, or ``POST /categories/{id}/scrape`` later) or the next full\nsync. With ``scrape: true`` the unban is refused as a whole when the sync cannot be queued\n(``worker_busy``, ``competitor_disabled``...).",
+        "operationId": "unban_api_v1_categories_banned__ban_id__unban_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "ban_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Ban Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnbanIn",
+                "examples": [
+                  {},
+                  {
+                    "scrape": true
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnbanOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/categories/{category_id}": {
       "get": {
         "tags": [
@@ -1584,6 +1814,235 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/categories/{category_id}/ban": {
+      "post": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "Ban a category: delete it with its subtree and skip it in every crawl",
+        "description": "Deletes the category, all its sub-categories, their products with their price history,\ntheir matches and match history. Matches of other competitors associated with a deleted\n(reference) product become ``deprecated``. Only the category's own metadata is kept (the\nreturned ban), to recreate it with ``POST /categories/banned/{ban_id}/unban``. Catalog syncs\nskip the category, every page below it and every product whose navigation path contains it.\n\nRefusals (HTTP 409): ``worker_busy`` (the competitor has an active job), ``matching_running``\n(a category of the reference catalog while a matching job runs).",
+        "operationId": "ban_api_v1_categories__category_id__ban_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Category Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BanIn",
+                "examples": [
+                  {},
+                  {
+                    "reason": "not our market",
+                    "banned_by": "alice"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BannedCategoryOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/categories/{category_id}/scrape": {
+      "post": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "Catalog sync of this category only (sub-categories, products, prices)",
+        "description": "Queues a ``catalog_sync`` job with ``options.category_id``: the crawl starts from the\ncategory's URL and follows its whole subtree, even when the category is empty in the\ndatabase (e.g. just unbanned). Banned sub-categories stay skipped. Never a full sync: nothing\nis flagged missing. Same refusals as ``POST /competitors/{key}/worker/start``.",
+        "operationId": "scrape_api_v1_categories__category_id__scrape_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Category Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategorySyncIn",
+                "examples": [
+                  {},
+                  {
+                    "max_products": 10
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        }
+      }
+    },
+    "/api/v1/categories/{category_id}/match": {
+      "post": {
+        "tags": [
+          "categories"
+        ],
+        "summary": "Match the products of this category only",
+        "description": "Queues a ``matching`` job with ``options.category_id``: only the competitor's products\nof this category and its sub-categories are (re)matched, against the whole reference\ncatalog. Same refusals as ``POST /matching/competitors/{key}/run`` (a category of the\nreference catalog itself is refused with ``matching_reference``).",
+        "operationId": "match_api_v1_categories__category_id__match_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          },
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "category_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Category Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategoryMatchIn",
+                "examples": [
+                  {},
+                  {
+                    "mode": "all"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
           }
         }
       }
@@ -3819,6 +4278,27 @@
             "description": "competitor key"
           },
           {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor product in one of these categories or their sub-categories, repeatable",
+              "title": "Category Id"
+            },
+            "description": "competitor product in one of these categories or their sub-categories, repeatable"
+          },
+          {
             "name": "q",
             "in": "query",
             "required": false,
@@ -4123,6 +4603,27 @@
               "title": "Competitor"
             },
             "description": "competitor key"
+          },
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor product in one of these categories or their sub-categories, repeatable",
+              "title": "Category Id"
+            },
+            "description": "competitor product in one of these categories or their sub-categories, repeatable"
           },
           {
             "name": "q",
@@ -4457,6 +4958,27 @@
               "title": "Competitor"
             },
             "description": "competitor key"
+          },
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "competitor product in one of these categories or their sub-categories, repeatable",
+              "title": "Category Id"
+            },
+            "description": "competitor product in one of these categories or their sub-categories, repeatable"
           },
           {
             "name": "q",
@@ -5854,6 +6376,220 @@
   },
   "components": {
     "schemas": {
+      "BanIn": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "why it is banned (shown in the banned list)"
+          },
+          "banned_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Banned By",
+            "description": "who banned it"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "BanIn"
+      },
+      "BannedCategoryOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id",
+            "description": "ban id (used to unban)"
+          },
+          "competitor_id": {
+            "type": "integer",
+            "title": "Competitor Id"
+          },
+          "competitor_key": {
+            "type": "string",
+            "title": "Competitor Key"
+          },
+          "category_id": {
+            "type": "integer",
+            "title": "Category Id",
+            "description": "id the category had before the ban (it is a new id after unban)"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "depth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth"
+          },
+          "breadcrumb": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Breadcrumb"
+          },
+          "details": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Details"
+          },
+          "parent_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Url"
+          },
+          "parent_category_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Category Id",
+            "description": "current id of its parent category, if it exists"
+          },
+          "first_seen_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Seen At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "banned_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Banned By"
+          },
+          "banned_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Banned At"
+          },
+          "deleted": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Deleted",
+            "description": "what the ban deleted: categories, products, observations, matches, matches_deprecated (matches of other competitors that pointed to a deleted reference product)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "competitor_id",
+          "competitor_key",
+          "category_id",
+          "name",
+          "slug",
+          "url",
+          "external_id",
+          "kind",
+          "depth",
+          "breadcrumb",
+          "details",
+          "parent_url",
+          "first_seen_at",
+          "reason",
+          "banned_by",
+          "banned_at",
+          "deleted"
+        ],
+        "title": "BannedCategoryOut"
+      },
       "CandidateOut": {
         "properties": {
           "rank": {
@@ -6110,6 +6846,18 @@
             ],
             "title": "Retry Failed Run Id",
             "description": "only the pages that failed in that catalog run: its failed product pages and failed listing pages with their sub-pages (no full crawl, never a full sync)"
+          },
+          "category_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Id",
+            "description": "only this stored category and its whole subtree (sub-categories, products), even when it is empty (e.g. just unbanned); not combinable with root_urls / retry_failed_run_id. Never a full sync"
           }
         },
         "additionalProperties": false,
@@ -6414,6 +7162,30 @@
         ],
         "title": "CategoryDetailOut"
       },
+      "CategoryMatchIn": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "incremental",
+              "deprecated",
+              "all"
+            ],
+            "title": "Mode",
+            "description": "same as POST /matching/competitors/{key}/run",
+            "default": "incremental"
+          },
+          "reembed": {
+            "type": "boolean",
+            "title": "Reembed",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CategoryMatchIn",
+        "description": "Matching of the products of one category (and its sub-categories)."
+      },
       "CategoryOut": {
         "properties": {
           "id": {
@@ -6613,6 +7385,47 @@
           "external_id"
         ],
         "title": "CategoryRefOut"
+      },
+      "CategorySyncIn": {
+        "properties": {
+          "max_products": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Products",
+            "description": "only sync the first N products"
+          },
+          "skip_products": {
+            "type": "boolean",
+            "title": "Skip Products",
+            "description": "only crawl sub-categories and product URLs",
+            "default": false
+          },
+          "resume_within_hours": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume Within Hours",
+            "description": "products synced less than N hours ago are not fetched again (0 = refetch all)",
+            "default": 48
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CategorySyncIn",
+        "description": "Catalog sync of one category: its sub-categories and products, details and prices."
       },
       "CategoryTreeNode": {
         "properties": {
@@ -7066,6 +7879,12 @@
           "categories": {
             "type": "integer",
             "title": "Categories"
+          },
+          "banned_categories": {
+            "type": "integer",
+            "title": "Banned Categories",
+            "description": "categories banned (deleted and skipped by the crawls)",
+            "default": 0
           },
           "products_active": {
             "type": "integer",
@@ -8995,6 +9814,18 @@
             "title": "Reembed",
             "description": "false (default): every text already embedded (by any product of any competitor) reuses its cached vector, only new texts are sent to Voyage AI, whatever the mode. true: embed every text of the run again and replace the cached vectors (paid; normally never needed).",
             "default": false
+          },
+          "category_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Id",
+            "description": "only the products of this category of the competitor and of its sub-categories"
           }
         },
         "additionalProperties": false,
@@ -9869,6 +10700,37 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ObservationUpdate"
+      },
+      "Page_BannedCategoryOut_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BannedCategoryOut"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "Page[BannedCategoryOut]"
       },
       "Page_CategoryOut_": {
         "properties": {
@@ -12418,6 +13280,54 @@
           "allowed"
         ],
         "title": "TaskAvailability"
+      },
+      "UnbanIn": {
+        "properties": {
+          "scrape": {
+            "type": "boolean",
+            "title": "Scrape",
+            "description": "also queue a catalog sync of the recreated category (refused as a whole, nothing unbanned, if the competitor's worker is busy)",
+            "default": false
+          },
+          "unbanned_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unbanned By"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UnbanIn"
+      },
+      "UnbanOut": {
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/CategoryOut",
+            "description": "the recreated category (empty, new id)"
+          },
+          "job": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the catalog sync queued when scrape=true"
+          }
+        },
+        "type": "object",
+        "required": [
+          "category"
+        ],
+        "title": "UnbanOut"
       },
       "UnreadCount": {
         "properties": {

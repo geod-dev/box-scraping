@@ -32,7 +32,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from competitor_catalog.core.adapter import load_adapter
 from competitor_catalog.core.config import CompetitorConfig
-from competitor_catalog.db.models import JOB_ACTIVE_STATUSES, Competitor, Notification, ScrapeRun, WorkerJob
+from competitor_catalog.db.models import (
+    JOB_ACTIVE_STATUSES,
+    Category,
+    Competitor,
+    Notification,
+    ScrapeRun,
+    WorkerJob,
+)
 from competitor_catalog.db.session import transaction
 from competitor_catalog.http.base import Fetcher
 from competitor_catalog.matching import service as matching_service
@@ -170,6 +177,7 @@ def enqueue_job(
 ) -> WorkerJob:
     options = normalize_options(task, options)
     _check_retry_run(session, competitor, task, options)
+    _check_category(session, competitor, options)
     if not competitor.enabled:
         raise JobRequestError("competitor_disabled", f"competitor {competitor.key} is disabled in its config")
     if task == "matching" and (code := matching_service.refusal(session, competitor, matching)):
@@ -217,6 +225,15 @@ def _check_retry_run(session: Session, competitor: Competitor, task: str, option
         raise JobRequestError("invalid_options", f"run #{run_id} is not a run of {competitor.key}")
     if task == "catalog_sync" and run.operation != "catalog_discovery":
         raise JobRequestError("invalid_options", f"run #{run_id} is not a catalog sync: retry it with a price refresh")
+
+
+def _check_category(session: Session, competitor: Competitor, options: dict[str, Any]) -> None:
+    category_id = options.get("category_id")
+    if category_id is None:
+        return
+    category = session.get(Category, category_id)
+    if category is None or category.competitor_id != competitor.id:
+        raise JobRequestError("invalid_options", f"category #{category_id} is not a category of {competitor.key}")
 
 
 def restart_options(job: WorkerJob) -> dict[str, Any]:

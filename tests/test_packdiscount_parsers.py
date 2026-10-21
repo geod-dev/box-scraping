@@ -110,6 +110,38 @@ def test_flat_product_list_pages_through_the_whole_catalog(adapter):
     assert len(listing.child_category_urls) == 200
     assert listing.next_page_url == f"{API}/products?amount=200&offset=200"
     assert listing.child_category_urls[0] == f"{API}/products/263481?{EXPAND}"
+    assert listing.scoped_child_urls == []
+
+
+def test_category_crawled_alone_reads_its_own_product_list(adapter):
+    # category pages list no product: a crawl limited to a category needs its product list
+    assert adapter.parse_listing(page("category_2_26.json", CAT_2_26)).scoped_child_urls == [
+        f"{CAT_2_26}/products?amount=200&offset=0"
+    ]
+    assert adapter.parse_listing(page("categories_root.json", ROOT)).scoped_child_urls == [PRODUCTS_0]
+
+
+def test_category_product_list_pages_through_the_category(adapter):
+    # shape observed on categories/2/products (2026-10-21): total 64, served by pages
+    body = {
+        "total": 64,
+        "offset": 0,
+        "amount": 50,
+        "type": "ResourceCollection",
+        "name": "products",
+        "elements": [
+            {"uri": "Packdiscount-FR-Site/rest/categories/2/products/P00041", "title": "Caisse"},
+            {"uri": "Packdiscount-FR-Site/rest/categories/2/products/263481", "title": "Simple"},
+        ],
+    }
+    url = f"{CAT_2}/products?amount=200&offset=0"
+    listing = adapter.parse_listing(make_page(json.dumps(body), url))
+    assert adapter.classify(make_page(json.dumps(body), url)) is PageKind.LISTING
+    assert listing.child_category_urls == [MASTER, SIMPLE]
+    assert listing.next_page_url == f"{CAT_2}/products?amount=200&offset=50"
+    # a small category comes without total/offset (observed on categories/2/26/products): complete
+    del body["total"], body["offset"], body["amount"]
+    assert adapter.parse_listing(make_page(json.dumps(body), url)).next_page_url is None
 
 
 # ---------------------------------------------------------------- products
