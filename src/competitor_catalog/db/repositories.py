@@ -24,6 +24,7 @@ from competitor_catalog.core.urls import last_path_segment
 from competitor_catalog.db.models import (
     BannedCategory,
     Category,
+    CategoryListing,
     Competitor,
     ListingPageCache,
     Product,
@@ -145,6 +146,183 @@ def category_subtree_ids(session: Session, competitor_id: int, root_id: int) -> 
         {"root": root_id, "cid": competitor_id},
     )
     return [r[0] for r in rows]
+
+
+def category_scope_product_ids(category_ids: Iterable[int] | Select, *, subcategories: bool = True) -> Select:
+    """Ids of the products shown in these categories (a select): the products they own, with
+    their sub-categories' when ``subcategories``, and the products they list from other categories
+    (``category_listings``: listed products, products of listed families and their subtree)."""
+    if not isinstance(category_ids, Select):
+        category_ids = list(category_ids)
+    base = select(Category.id).where(Category.id.in_(category_ids))
+    if subcategories:
+        tree = base.cte("scope_categories", recursive=True)
+        tree = tree.union(select(Category.id).join(tree, Category.parent_id == tree.c.id))
+    else:
+        tree = base.cte("scope_categories")
+    listing_categories = select(tree.c.id)
+    listed = (
+        select(CategoryListing.listed_category_id.label("id"))
+        .where(CategoryListing.category_id.in_(listing_categories), CategoryListing.listed_category_id.is_not(None))
+        .cte("scope_listed_categories", recursive=True)
+    )
+    listed = listed.union(select(Category.id).join(listed, Category.parent_id == listed.c.id))
+    listed_products = select(CategoryListing.listed_product_id).where(
+        CategoryListing.category_id.in_(listing_categories), CategoryListing.listed_product_id.is_not(None)
+    )
+    return (
+        select(Product.id)
+        .where(
+            or_(
+                Product.category_id.in_(select(tree.c.id)),
+                Product.category_id.in_(select(listed.c.id)),
+                Product.id.in_(listed_products),
+            )
+        )
+        .correlate(None)
+    )
+
+
+def store_category_listings(
+    session: Session,
+    competitor_id: int,
+    listings: dict[str, set[tuple[str, str | None]]],
+    *,
+    prune: bool,
+    run_id: int | None,
+    now: datetime,
+) -> int:
+    """Store what categories list on the site (category URL -> (URL, reference) of every item its
+    listing pages show) as ``category_listings``, keeping only the links the tree does not imply:
+    an item that belongs to the category's subtree, or that a sub-category lists too, is not
+    stored. With ``prune`` (every listing page was read), the links of these categories that were
+    not listed this time are deleted. Returns the number of links seen."""
+    categories = session.execute(
+        select(Category.id, Category.parent_id, Category.url).where(Category.competitor_id == competitor_id)
+    ).all()
+    parents = {cid: parent for cid, parent, _ in categories}
+    by_url = {url: cid for cid, _, url in categories}
+    item_urls = {url for items in listings.values() for url, _ in items if url not in by_url}
+    item_refs = {ref for items in listings.values() for _, ref in items if ref}
+    products: dict[str, tuple[int, int | None]] = {}
+    for chunk in _chunks(sorted(item_urls)):
+        for pid, cid, url in session.execute(
+            select(Product.id, Product.category_id, Product.url).where(
+                Product.competitor_id == competitor_id, Product.url.in_(chunk)
+            )
+        ):
+            products[url] = (pid, cid)
+    by_ref: dict[str, tuple[int, int | None]] = {}
+    for chunk in _chunks(sorted(item_refs)):
+        for pid, cid, ref in session.execute(
+            select(Product.id, Product.category_id, Product.catalog_reference).where(
+                Product.competitor_id == competitor_id, Product.catalog_reference.in_(chunk)
+            )
+        ):
+            by_ref[ref] = (pid, cid)
+
+    lineage: dict[int, set[int]] = {}
+
+    def ancestors(category_id: int) -> set[int]:
+        """The category and its ancestors."""
+        if category_id not in lineage:
+            chain, current = set(), category_id
+            while current is not None and current not in chain:
+                chain.add(current)
+                current = parents.get(current)
+            lineage[category_id] = chain
+        return lineage[category_id]
+
+    # (listed category id, listed product id) -> categories listing it without owning it
+    candidates: dict[tuple[int | None, int | None], set[int]] = {}
+    owners = {by_url[url] for url in listings if url in by_url}
+    for url, items in listings.items():
+        owner = by_url.get(url)
+        if owner is None:
+            continue
+        for item_url, ref in items:
+            if item_url in by_url:
+                target, home = (by_url[item_url], None), by_url[item_url]
+            else:
+                found = products.get(item_url) or (by_ref.get(ref) if ref else None)
+                if found is None:
+                    continue  # not stored (banned, failed, not synced in this run)
+                target, home = (None, found[0]), found[1]
+            if home is not None and owner in ancestors(home):
+                continue  # in the category's own subtree
+            candidates.setdefault(target, set()).add(owner)
+    links = {
+        (owner, *target)
+        for target, listing_owners in candidates.items()
+        for owner in listing_owners
+        # a sub-category listing it too is the more precise place
+        if not any(other != owner and owner in ancestors(other) for other in listing_owners)
+    }
+
+    existing = {
+        (row.category_id, row.listed_category_id, row.listed_product_id): row
+        for row in session.scalars(
+            select(CategoryListing).where(
+                CategoryListing.competitor_id == competitor_id, CategoryListing.category_id.in_(owners)
+            )
+        )
+    }
+    for key in links:
+        row = existing.get(key)
+        if row is None:
+            owner, listed_category_id, listed_product_id = key
+            row = CategoryListing(
+                competitor_id=competitor_id,
+                category_id=owner,
+                listed_category_id=listed_category_id,
+                listed_product_id=listed_product_id,
+                first_seen_at=now,
+            )
+            session.add(row)
+        row.last_seen_at = now
+        row.last_seen_run_id = run_id
+    if prune:
+        for key, row in existing.items():
+            if key not in links:
+                session.delete(row)
+    session.flush()
+    return len(links)
+
+
+def refresh_category_roles(session: Session, competitor_id: int) -> int:
+    """``extra`` for the categories whose subtree owns no product (whatever its status) but lists
+    products of other categories, ``main`` for the others. Returns the number of changes."""
+    result = session.execute(
+        text(
+            """
+            WITH RECURSIVE owning AS (
+                SELECT DISTINCT category_id AS id FROM products
+                WHERE competitor_id = :cid AND category_id IS NOT NULL
+                UNION
+                SELECT c.parent_id FROM categories c JOIN owning o ON c.id = o.id WHERE c.parent_id IS NOT NULL
+            ), listing AS (
+                SELECT DISTINCT category_id AS id FROM category_listings WHERE competitor_id = :cid
+                UNION
+                SELECT c.parent_id FROM categories c JOIN listing l ON c.id = l.id WHERE c.parent_id IS NOT NULL
+            ), roles AS (
+                SELECT c.id,
+                       CASE WHEN c.id IN (SELECT id FROM listing) AND c.id NOT IN (SELECT id FROM owning)
+                            THEN 'extra' ELSE 'main' END AS role
+                FROM categories c WHERE c.competitor_id = :cid
+            )
+            UPDATE categories c SET role = r.role
+            FROM roles r
+            WHERE c.id = r.id AND c.role IS DISTINCT FROM r.role
+            """
+        ),
+        {"cid": competitor_id},
+    )
+    return result.rowcount or 0
+
+
+def _chunks(values: list[str], size: int = 1000) -> Iterable[list[str]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def category_url(session: Session, competitor_id: int, category_id: int) -> str:
@@ -329,8 +507,8 @@ def select_products_for_price_refresh(
     stmt = select(Product).where(Product.competitor_id == competitor_id)
     if not include_missing:
         stmt = stmt.where(Product.status == "active")
-    if category_ids is not None:
-        stmt = stmt.where(Product.category_id.in_(category_ids))
+    if category_ids is not None:  # the products shown in these categories, sub-categories included
+        stmt = stmt.where(Product.id.in_(category_scope_product_ids(category_ids)))
     if references:
         stmt = stmt.where(Product.catalog_reference.in_(references))
     if product_ids is not None:

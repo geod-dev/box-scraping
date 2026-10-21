@@ -237,7 +237,9 @@ def _estimate_category_sync(
     subtree = repo.category_subtree_ids(session, competitor_id, category_id)
     estimate.listing_pages = max(1, len(subtree))
     products = session.scalar(
-        select(func.count()).select_from(Product).where(Product.category_id.in_(subtree), Product.status == "active")
+        select(func.count())
+        .select_from(Product)
+        .where(Product.id.in_(repo.category_scope_product_ids([category_id])), Product.status == "active")
     )
     plural = "category" if len(subtree) == 1 else "categories"
     estimate.basis.append(f"category #{category_id}: {len(subtree)} known {plural} in its subtree")
@@ -273,9 +275,13 @@ def estimate_matching(
     scope_basis = []
     if options.get("category_id") is not None:
         subtree = repo.category_subtree_ids(session, competitor_id, int(options["category_id"]))
-        eligible = eligible.where(Product.category_id.in_(subtree))
-        rows = rows.where(ProductMatch.product_id.in_(select(Product.id).where(Product.category_id.in_(subtree))))
-        scope_basis = [f"only category #{options['category_id']} and its {len(subtree) - 1} sub-category(ies)"]
+        in_scope = repo.category_scope_product_ids([int(options["category_id"])])
+        eligible = eligible.where(Product.id.in_(in_scope))
+        rows = rows.where(ProductMatch.product_id.in_(in_scope))
+        scope_basis = [
+            f"only category #{options['category_id']} and its {len(subtree) - 1} sub-category(ies), "
+            "with the products they list from other categories"
+        ]
 
     def count(stmt) -> int:
         return session.scalar(select(func.count()).select_from(stmt.subquery()))
@@ -370,7 +376,7 @@ def count_price_refresh_selection(session: Session, competitor_id: int, options:
     category_ids = None
     if options.get("category"):
         category = repo.find_category_by_any(session, competitor_id, str(options["category"]))
-        category_ids = repo.category_subtree_ids(session, competitor_id, category.id) if category else []
+        category_ids = [category.id] if category else []
     product_ids = None
     if options.get("retry_failed_run_id") is not None:
         product_ids = repo.failed_product_ids(session, competitor_id, int(options["retry_failed_run_id"]))

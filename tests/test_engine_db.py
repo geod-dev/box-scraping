@@ -15,14 +15,21 @@ from sqlalchemy import func, select, text
 from competitor_catalog.core.adapter import load_adapter
 from competitor_catalog.core.config import load_competitor_config, parse_competitor_config
 from competitor_catalog.db import repositories as repo
-from competitor_catalog.db.models import Category, Product, ScrapeObservation, ScrapeRun, ScrapeRunItem
+from competitor_catalog.db.models import (
+    Category,
+    CategoryListing,
+    Product,
+    ScrapeObservation,
+    ScrapeRun,
+    ScrapeRunItem,
+)
 from competitor_catalog.db.session import transaction
 from competitor_catalog.services.catalog_sync import CatalogSync, CatalogSyncOptions
 from competitor_catalog.services.price_refresh import PriceRefresh, PriceRefreshOptions
 from competitor_catalog.services.runs import RunObserver
 from competitor_catalog.settings import DEFAULT_COMPETITOR_CONFIG_DIR
 from tests.conftest import FakeFetcher, fixture_text
-from tests.toy_adapter import BASE, toy_site
+from tests.toy_adapter import BASE, PALLETS_LIST, add_extra_categories, toy_site
 
 pytestmark = pytest.mark.db
 
@@ -498,3 +505,92 @@ def test_a_resumed_sync_replays_the_listing_pages_of_the_interrupted_one(toy):
         assert run.full_scope and run.stats["listing_pages_replayed"] == 4 and run.pages_fetched == 2
         assert s.scalar(select(func.count()).select_from(ListingPageCache)) == 0  # completed: purged
         assert s.scalar(select(func.count()).select_from(Product).where(Product.status == "missing")) == 0
+
+
+# --------------------------------------------------------------------------- extra categories
+
+
+def _listings(toy) -> set[tuple[str, str]]:
+    """(listing category, listed category or product reference)"""
+    with transaction(toy.factory) as s:
+        names = dict(s.execute(select(Category.id, Category.name)).all())
+        refs = dict(s.execute(select(Product.id, Product.catalog_reference)).all())
+        return {
+            (
+                names[row.category_id],
+                names[row.listed_category_id] if row.listed_category_id else refs[row.listed_product_id],
+            )
+            for row in s.scalars(select(CategoryListing))
+        }
+
+
+def _shown(toy, category_name: str, *, subcategories: bool = True) -> set[str]:
+    with transaction(toy.factory) as s:
+        category_id = s.scalar(select(Category.id).where(Category.name == category_name))
+        scope = repo.category_scope_product_ids([category_id], subcategories=subcategories)
+        return set(s.scalars(select(Product.catalog_reference).where(Product.id.in_(scope))))
+
+
+def test_categories_listing_products_of_other_categories_become_extra(toy):
+    result, fetcher = toy.sync(add_extra_categories(toy_site()))
+    assert result.status == "succeeded", result.incomplete_reasons
+    assert len(fetcher.requests) == len(set(fetcher.requests))
+    # Promo's A1 is implied by its sub-category Pallets; Pallets lists B as a whole (like a family)
+    assert _listings(toy) == {("Promo", "A2"), ("Pallets", "A1"), ("Pallets", "B")}
+    with transaction(toy.factory) as s:
+        roles = dict(s.execute(select(Category.name, Category.role)).all())
+        assert roles == {"Root": "main", "A": "main", "B": "main", "Promo": "extra", "Pallets": "extra"}
+        products = s.scalar(select(func.count()).select_from(Product))
+    assert products == 4  # listed products are not duplicated: each one has one category
+    assert _shown(toy, "Promo") == {"A1", "A2", "B1"}
+    assert _shown(toy, "Promo", subcategories=False) == {"A2"}
+    assert _shown(toy, "Pallets") == {"A1", "B1"}
+    assert _shown(toy, "A") == {"A1", "A2", "A3"}  # main categories show what they own
+    assert _shown(toy, "Root") == {"A1", "A2", "A3", "B1"}
+
+
+def test_listing_links_follow_the_site_and_survive_incomplete_runs(toy):
+    site = add_extra_categories(toy_site())
+    toy.sync(site)
+    page = json.loads(site[PALLETS_LIST])
+    page["products"] = []  # Pallets stops listing A1: Promo is now the place that lists it
+    site[PALLETS_LIST] = json.dumps(page)
+    toy.sync(site)
+    assert _listings(toy) == {("Promo", "A1"), ("Promo", "A2"), ("Pallets", "B")}
+    # a run that could not read a listing page removes no link
+    result, _ = toy.sync(site, failing={PALLETS_LIST})
+    assert result.status == "partial"
+    assert _listings(toy) == {("Promo", "A1"), ("Promo", "A2"), ("Pallets", "B")}
+    # nothing listed any more: Pallets is an empty category again, so a main one
+    page["children"] = []
+    site[PALLETS_LIST] = json.dumps(page)
+    toy.sync(site)
+    assert _listings(toy) == {("Promo", "A1"), ("Promo", "A2")}
+    with transaction(toy.factory) as s:
+        assert dict(s.execute(select(Category.name, Category.role)).all())["Pallets"] == "main"
+
+
+def test_an_extra_category_can_be_scraped_and_refreshed_alone(toy):
+    site = add_extra_categories(toy_site())
+    toy.sync(site, skip_products=True)
+    with transaction(toy.factory) as s:
+        promo_id = s.scalar(select(Category.id).where(Category.name == "Promo"))
+    result, _ = toy.sync(site, category_id=promo_id)
+    assert result.status == "succeeded", result.incomplete_reasons
+    # the products it lists are synced, in their own category
+    assert set(toy.products()) == {"A1", "A2", "B1"}
+    assert _shown(toy, "Promo") == {"A1", "A2", "B1"}
+    refreshed, fetcher = toy.refresh(site, category="CP")
+    assert sorted(fetcher.requests) == [f"{BASE}/p/A1", f"{BASE}/p/A2", f"{BASE}/p/B1"]
+    assert refreshed.status == "succeeded"
+
+
+def test_banning_an_extra_category_keeps_the_products_it_lists(toy):
+    from competitor_catalog.services.category_bans import ban_category
+
+    toy.sync(add_extra_categories(toy_site()))
+    with transaction(toy.factory) as s:
+        ban = ban_category(s, s.scalar(select(Category).where(Category.name == "Promo")))
+        assert ban.deleted["categories"] == 2 and ban.deleted["products"] == 0
+    assert set(toy.products()) == {"A1", "A2", "A3", "B1"}
+    assert _listings(toy) == set()

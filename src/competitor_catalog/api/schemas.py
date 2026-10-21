@@ -16,6 +16,12 @@ JobTask = Literal["catalog_sync", "price_refresh", "matching"]
 JobStatus = Literal["queued", "running", "paused", "succeeded", "partial", "failed", "cancelled", "interrupted"]
 WorkerState = Literal["idle", "queued", "running", "pausing", "paused", "resuming", "stopping"]
 LifecycleStatus = Literal["active", "missing"]
+CategoryRole = Literal["main", "extra"]
+ROLE_DESCRIPTION = (
+    "main: its subtree owns products (each product belongs to exactly one main category). extra: its "
+    "subtree owns no product but lists, on the site, products filed under other categories (promotions, "
+    "pallet sales...); an extra category can sit below a main one"
+)
 NotificationLevel = Literal["info", "success", "warning", "error"]
 MatchStatus = Literal["auto_matched", "needs_review", "no_match", "validated", "rejected", "deprecated"]
 MatchingMode = Literal["incremental", "deprecated", "all"]
@@ -282,6 +288,7 @@ class CategoryOut(Orm):
     last_seen_at: datetime
     last_seen_run_id: int | None
     missing_since: datetime | None
+    role: CategoryRole = Field(description=ROLE_DESCRIPTION)
     created_at: datetime
     updated_at: datetime
 
@@ -298,6 +305,10 @@ class CategoryDetailOut(CategoryOut):
     children_count: int
     product_count: int = Field(description="active products directly in this category")
     subtree_product_count: int = Field(description="active products in this category and its descendants")
+    listed_product_count: int = Field(
+        description="active products shown in this category and its descendants: the ones they own and the ones "
+        "they list from other categories (what GET /products?category_id= returns); the count of an extra category"
+    )
 
 
 class CategoryTreeNode(BaseModel):
@@ -306,8 +317,13 @@ class CategoryTreeNode(BaseModel):
     kind: str | None
     status: LifecycleStatus
     external_id: str | None
-    product_count: int
-    subtree_product_count: int
+    role: CategoryRole = Field(description=ROLE_DESCRIPTION)
+    product_count: int = Field(description="active products directly in this category")
+    subtree_product_count: int = Field(description="active products owned by this category and its descendants")
+    listed_product_count: int = Field(
+        description="active products shown in this category and its descendants, the ones listed from other "
+        "categories included (what GET /products?category_id= returns)"
+    )
     children: list[CategoryTreeNode] = Field(default_factory=list)
 
 
@@ -548,6 +564,10 @@ class ProductDetailOut(ProductListItem):
     extra: dict[str, Any]
     last_seen_run_id: int | None
     category_path: list[CategoryRefOut]
+    listed_in: list[CategoryRefOut] = Field(
+        description="other categories that list this product on the site (extra categories: promotions, pallet "
+        "sales...), directly or through its family; by name"
+    )
     latest_prices: list[ObservationOut] = Field(description="all tiers of the latest capture")
     match_count: int = Field(
         description="associations (auto_matched or validated) involving this product: competitor products "

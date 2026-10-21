@@ -22,7 +22,7 @@ from competitor_catalog.api.deps import (
 from competitor_catalog.api.routes.competitors import refusal
 from competitor_catalog.core.urls import last_path_segment
 from competitor_catalog.db import repositories as repo
-from competitor_catalog.db.models import BannedCategory, Category, Competitor, Product
+from competitor_catalog.db.models import BannedCategory, Category, CategoryListing, Competitor, Product
 from competitor_catalog.services import category_bans
 from competitor_catalog.services import jobs as job_service
 
@@ -45,6 +45,7 @@ def list_categories(
     roots: Annotated[bool, Query(description="only categories without parent")] = False,
     status: schemas.LifecycleStatus | None = None,
     kind: str | None = None,
+    role: Annotated[schemas.CategoryRole | None, Query(description=schemas.ROLE_DESCRIPTION)] = None,
     q: Annotated[str | None, Query(description="search in name, external id, URL")] = None,
 ):
     stmt = select(Category).order_by(Category.depth.nulls_last(), Category.name, Category.id)
@@ -59,6 +60,8 @@ def list_categories(
         stmt = stmt.where(Category.status == status)
     if kind:
         stmt = stmt.where(Category.kind == kind)
+    if role:
+        stmt = stmt.where(Category.role == role)
     if q:
         like = f"%{q}%"
         stmt = stmt.where(or_(Category.name.ilike(like), Category.external_id.ilike(like), Category.url.ilike(like)))
@@ -71,39 +74,79 @@ def category_tree(
     competitor: Annotated[str, Query(description="competitor key")],
     include_missing: bool = False,
 ):
-    """Nested tree with product counts (active products), sorted by name."""
+    """Nested tree with product counts (active products), sorted by name. Main and extra
+    categories (``role``) are in the same tree: an extra category can sit below a main one."""
     competitor_id = competitor_or_404(session, competitor).id
     stmt = select(Category).where(Category.competitor_id == competitor_id)
     if not include_missing:
         stmt = stmt.where(Category.status == "active")
     categories = list(session.scalars(stmt.order_by(Category.name)))
-    counts = dict(
-        session.execute(
-            select(Product.category_id, func.count())
-            .where(Product.competitor_id == competitor_id, Product.status == "active")
-            .group_by(Product.category_id)
-        ).all()
-    )
+    owned: dict[int | None, set[int]] = defaultdict(set)
+    for product_id, category_id in session.execute(
+        select(Product.id, Product.category_id).where(
+            Product.competitor_id == competitor_id, Product.status == "active"
+        )
+    ):
+        owned[category_id].add(product_id)
+    active = set().union(*owned.values())
+    listings = session.execute(
+        select(
+            CategoryListing.category_id, CategoryListing.listed_category_id, CategoryListing.listed_product_id
+        ).where(CategoryListing.competitor_id == competitor_id)
+    ).all()
     ids = {c.id for c in categories}
     children: dict[int | None, list[Category]] = defaultdict(list)
     for c in categories:
         children[c.parent_id if c.parent_id in ids else None].append(c)
+    all_children: dict[int, list[int]] = defaultdict(list)
+    for category_id, parent_id in session.execute(
+        select(Category.id, Category.parent_id).where(Category.competitor_id == competitor_id)
+    ):
+        if parent_id is not None:
+            all_children[parent_id].append(category_id)
 
-    def build(category: Category, seen: frozenset[int]) -> schemas.CategoryTreeNode:
-        nodes = [build(child, seen | {child.id}) for child in children[category.id] if child.id not in seen]
-        own = counts.get(category.id, 0)
-        return schemas.CategoryTreeNode(
-            id=category.id,
-            name=category.name,
-            kind=category.kind,
-            status=category.status,
-            external_id=category.external_id,
-            product_count=own,
-            subtree_product_count=own + sum(n.subtree_product_count for n in nodes),
-            children=nodes,
+    def owned_below(category_id: int, seen: set[int]) -> set[int]:
+        """Active products of a listed category (a family) and its subtree."""
+        result = set(owned.get(category_id, ()))
+        for child in all_children[category_id]:
+            if child not in seen:
+                seen.add(child)
+                result |= owned_below(child, seen)
+        return result
+
+    listed: dict[int, set[int]] = defaultdict(set)  # category -> active products it lists
+    for category_id, listed_category_id, listed_product_id in listings:
+        if listed_category_id is not None:
+            listed[category_id] |= owned_below(listed_category_id, {listed_category_id})
+        elif listed_product_id in active:
+            listed[category_id].add(listed_product_id)
+
+    def build(category: Category, seen: frozenset[int]) -> tuple[schemas.CategoryTreeNode, set[int]]:
+        built = [build(child, seen | {child.id}) for child in children[category.id] if child.id not in seen]
+        nodes = [node for node, _ in built]
+        own = len(owned.get(category.id, ()))
+        subtree = own + sum(n.subtree_product_count for n in nodes)
+        shown: set[int] = set()
+        if listings:  # without listings, what a category shows is what its subtree owns
+            shown = owned.get(category.id, set()) | listed.get(category.id, set())
+            shown = shown.union(*(products for _, products in built))
+        return (
+            schemas.CategoryTreeNode(
+                id=category.id,
+                name=category.name,
+                kind=category.kind,
+                status=category.status,
+                external_id=category.external_id,
+                role=category.role,
+                product_count=own,
+                subtree_product_count=subtree,
+                listed_product_count=len(shown) if listings else subtree,
+                children=nodes,
+            ),
+            shown,
         )
 
-    return [build(root, frozenset({root.id})) for root in children[None]]
+    return [build(root, frozenset({root.id}))[0] for root in children[None]]
 
 
 # --------------------------------------------------------------------------- banned categories
@@ -227,6 +270,7 @@ def get_category(category_id: int, session: SessionDep):
         ),
         "product_count": active_products(Product.category_id == category.id),
         "subtree_product_count": active_products(Product.category_id.in_(subtree)),
+        "listed_product_count": active_products(Product.id.in_(repo.category_scope_product_ids([category.id]))),
     }
 
 
@@ -251,6 +295,9 @@ def update_category(category_id: int, body: schemas.CategoryUpdate, session: Ses
     for field, value in changes.items():
         setattr(category, field, value)
     _commit(session)
+    if "parent_id" in changes:
+        repo.refresh_category_roles(session, category.competitor_id)
+        session.commit()
     return category
 
 
@@ -258,7 +305,10 @@ def update_category(category_id: int, body: schemas.CategoryUpdate, session: Ses
 def delete_category(category_id: int, session: SessionDep):
     """Its products and sub-categories are kept, detached (``category_id``/``parent_id`` set to null).
     A later catalog sync recreates it if it still exists on the site."""
-    session.delete(_category(session, category_id))
+    category = _category(session, category_id)
+    session.delete(category)
+    session.flush()
+    repo.refresh_category_roles(session, category.competitor_id)
     session.commit()
     return Response(status_code=204)
 

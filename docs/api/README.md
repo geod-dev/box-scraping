@@ -195,7 +195,8 @@ both tasks with default options. A job also keeps its initial `estimate`.
 ### Scraped data
 
 * **Categories**: per-competitor hierarchy (`parent_id`, `depth`, `kind`: for Antalis
-  `cat`/`sub`/`plp`/`pdp`), `status` `active` | `missing`. `GET /categories/tree?competitor=`
+  `cat`/`sub`/`plp`/`pdp`), `status` `active` | `missing`, `role` `main` | `extra` (see
+  [Main and extra categories](#main-and-extra-categories)). `GET /categories/tree?competitor=`
   returns the nested tree with product counts, ideal for a sidebar.
 * **Products**: one row per competitor reference (`catalog_reference`; identity
   `identity_key` = `ref:<reference>`). Fields: `title`, `brand`, `description`,
@@ -221,6 +222,44 @@ both tasks with default options. A job also keeps its initial `estimate`.
 All of them have list/get/create/update/delete endpoints (runs and run items: read and
 delete only; they are written by the worker). Deleting a product deletes its price history.
 Manual edits may be overwritten by the next catalog sync (the site is the source of truth).
+
+### Main and extra categories
+
+Some sites show a product in several categories. Packdiscount files each family in one
+category (its own) and also lists it in merchandising categories: "Promotions",
+"Vente à la palette", "Emballage écologique"... A product has **one** category
+(`category_id`, `category_path`): its own. The other categories that show it **list** it.
+
+* `role: "main"`: the category's subtree owns products. Every product belongs to exactly one
+  main category: the main tree is the catalog without duplicates (counts add up).
+* `role: "extra"`: the category's subtree owns no product but lists products of other
+  categories. An extra category can sit below a main one (Packdiscount "Emballages
+  E-commerce" › "Emballages textiles" is extra, its sibling "Vente par palette" is main), and
+  its parent chain up to the root is kept (`parent_id`, `path`, `breadcrumb`).
+* The role is computed by the catalog sync from what the site lists (no site flag is
+  trusted); a category that owns nothing and lists nothing is `main` (e.g. just unbanned).
+  Every category is `main` until the first catalog sync that records listings.
+
+For a UI: build the main tree from the `main` nodes and an "extra categories" tree from the
+`extra` nodes (keep their `main` ancestors as plain headers when needed). Both trees work the
+same everywhere, because every "products of a category" feature includes the listed products:
+
+* `GET /products?category_id=` and `/products/facets`: the products the category and its
+  sub-categories own **and** list (`include_subcategories=false`: the category's own and the
+  ones it lists itself).
+* `GET /matching/*?category_id=`, `POST /categories/{id}/match`, a price refresh with
+  `category`: same scope.
+* `POST /categories/{id}/scrape`: the crawl also follows what the category lists, so scraping
+  an extra category syncs the products it shows (they stay in their own category).
+* Banning an extra category removes it and its listings, **not** the listed products (they
+  belong to another category).
+
+Counts: `product_count` (own products) and `subtree_product_count` (owned by the subtree) are 0
+for an extra category; `listed_product_count` (tree and `GET /categories/{id}`) counts the
+products the category and its subtree show, listed ones included: it is what
+`GET /products?category_id=` returns, so use it as the count of an extra category. Filter with
+`GET /categories?role=extra`. A product page has `listed_in`: the other categories that list it
+(directly or through its family).
 
 ### Banned categories, category syncs and category matchings
 
@@ -252,13 +291,14 @@ a plain `DELETE /categories/{id}` comes back with the next catalog sync, a ban d
   (`worker_busy`...) nothing is unbanned (409).
 * `POST /categories/{id}/scrape` (`{"max_products"?, "skip_products"?, "resume_within_hours"?}`,
   202, a `Job`): catalog sync of **this category only**: the crawl starts from its URL and
-  follows its whole subtree (sub-categories, products, details, prices), even when it is
-  empty in the database. Same as `worker/start` with `{"task": "catalog_sync", "options":
+  follows its whole subtree (sub-categories, products, details, prices) and what it lists
+  from other categories (extra categories), even when it is empty in the database. Same as `worker/start` with `{"task": "catalog_sync", "options":
   {"category_id": <id>}}`; same refusals (`worker_busy`...). It is never a full sync: nothing
   is flagged missing and `last_full_catalog_at` does not change. Its estimate counts the
   category's known subtree; for an empty category the size is unknown (`products: null`).
 * `POST /categories/{id}/match` (`{"mode"?, "reembed"?}`, 202, a `Job`): matching of the
-  competitor's products of this category and its sub-categories only, against the whole
+  competitor's products of this category and its sub-categories only (listed products
+  included, see [Main and extra categories](#main-and-extra-categories)), against the whole
   reference catalog. Same as `POST /matching/competitors/{key}/run` with `category_id`; a
   category of the reference catalog is refused (`matching_reference`).
 
@@ -390,7 +430,7 @@ open: see [Live events](#live-events-server-sent-events).
 * `GET /products/facets` (same filters) → brands, statuses and the most frequent values of
   each normalized attribute, with counts: build filter widgets from it.
 * `GET /categories/tree?competitor=antalis_fr` for the category navigation.
-* Product page: `GET /products/{id}` (adds `category_path`, all `latest_prices` tiers,
+* Product page: `GET /products/{id}` (adds `category_path`, `listed_in`, all `latest_prices` tiers,
   `attributes`, `images`, `long_description`), `GET /products/{id}/prices/history` (chart;
   `?quantity=` to follow one tier), `GET /products/{id}/prices/for-quantity?quantity=500`
   (price applicable to a quantity). `GET /products/by-reference/antalis_fr/503623` finds a

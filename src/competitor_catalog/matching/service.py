@@ -152,12 +152,14 @@ def eligible_products(competitor_id: int):
 
 
 def category_products(session: Session, competitor_id: int, category_id: int):
-    """Ids of the competitor's products in this category and its sub-categories (a select)."""
+    """Ids of the competitor's products shown in this category (a select): its own and its
+    sub-categories', and those it lists from other categories (extra categories)."""
     category = session.get(Category, category_id)
     if category is None or category.competitor_id != competitor_id:
         raise MatchingError("invalid_category", f"category #{category_id} is not a category of this competitor")
-    subtree = repo.category_subtree_ids(session, competitor_id, category_id)
-    return select(Product.id).where(Product.competitor_id == competitor_id, Product.category_id.in_(subtree))
+    return select(Product.id).where(
+        Product.competitor_id == competitor_id, Product.id.in_(repo.category_scope_product_ids([category_id]))
+    )
 
 
 # --------------------------------------------------------------------------- loading

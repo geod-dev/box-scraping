@@ -21,8 +21,13 @@ whose products were never discovered). Such a run is never full scope.
 
 ``category_id`` crawls one stored category (even empty, e.g. just unbanned) with its whole
 subtree. A crawl that does not start from the configured roots also reads the listing pages
-the adapter marks as ``scoped_child_urls`` (a category's own product list when the full crawl
-reaches products through a flat list instead).
+the adapter marks as ``scoped_child_urls`` (pages the full crawl reaches another way, e.g. a
+flat product list it has as a root).
+
+What each category lists (its listing pages, or the separate list the adapter marks with
+``listed_in``) is compared with the tree at the end of the run: a family or product listed by a
+category although it belongs elsewhere is stored in ``category_listings``, and the categories
+whose subtree owns no product but lists some become ``extra`` (``categories.role``).
 
 Banned categories (``banned_categories``) are never crawled: a listing page of a banned
 category, or below one, is skipped without fetching its children, and a product whose
@@ -157,6 +162,18 @@ class CatalogSync:
             self._record_unprocessed_links(tracker, state)
             with transaction(self.factory) as session:
                 linked = repo.resolve_category_parents(session, self.competitor_id)
+                tracker.stats["category_listings"] = repo.store_category_listings(
+                    session,
+                    self.competitor_id,
+                    state.listings,
+                    # a retry may read one page of a list: never a reason to drop the other pages' links
+                    prune=state.listings_complete
+                    and options.max_listing_pages is None
+                    and options.retry_failed_run_id is None,
+                    run_id=tracker.run_id,
+                    now=utcnow(),
+                )
+                repo.refresh_category_roles(session, self.competitor_id)
             tracker.stats["late_parent_links"] = linked
             complete = not state.incomplete_reasons
             if complete and options.is_full_scope:
@@ -206,13 +223,17 @@ class CatalogSync:
             pages += 1
             is_root = url in state.roots
             critical = is_root and state.critical_roots
+            read = False
             try:
-                self._process_listing(tracker, state, url, is_root, queue, queued, critical=critical)
+                read = self._process_listing(tracker, state, url, is_root, queue, queued, critical=critical)
             except FatalFetchError:
                 raise
             except Exception as exc:  # one broken page must not kill a multi-hour crawl
                 log.exception("unexpected error on listing page %s", url)
                 self._page_failed(tracker, state, url, exc, critical=critical)
+            if not read:
+                # Some category lists are only partly known: stored listings are not pruned.
+                state.listings_complete = False
             tracker.flush(_credits(self.fetcher))
             self.observer.progress("crawl_listings", pages, None, pending=len(queue))
         self.observer.progress("crawl_listings", pages, pages)
@@ -234,21 +255,22 @@ class CatalogSync:
         queued: set[str],
         *,
         critical: bool,
-    ) -> None:
+    ) -> bool:
+        """False when the page could not be read (fetch or parse failure)."""
         page = self._fetch(tracker, url, "listing_page", state, critical=critical)
         if page is None:
-            return
+            return False
         try:
             kind = self.adapter.classify(page)
             if kind is PageKind.PRODUCT:
                 # A navigation link that leads straight to a product page.
                 state.add_product(ProductLink(url=self.adapter.normalize_url(page.final_url)), page)
                 tracker.add_item_tx(item_type="listing_page", url=url, status="skipped", warnings=["is a product page"])
-                return
+                return True
             listing = self.adapter.parse_listing(page)
         except PageError as exc:
             self._page_failed(tracker, state, url, exc, critical=critical)
-            return
+            return False
 
         category = listing.category
         continuation_of = state.page_owner.get(url)
@@ -268,14 +290,18 @@ class CatalogSync:
             if not ancestors and not is_root and category.url not in state.root_canonicals:
                 # Without navigation path the scope cannot be decided: never assume "outside".
                 raise PageParseError("category page without navigation ancestors (breadcrumb)", url=url)
+            if url in state.listed_urls or category.url in state.listed_urls:
+                # listed by a category of the crawl (e.g. a family in an extra category): crawled
+                # with its subtree although it belongs to another part of the tree
+                state.root_canonicals.add(category.url)
             if not self.adapter.is_in_scope(category.url, ancestors, state.root_canonicals):
                 tracker.add_item_tx(
                     item_type="listing_page", url=url, status="skipped", warnings=["outside the crawl scope"]
                 )
-                return
+                return True
             if self._banned.covers(category.url, category.external_id, ancestors):
                 self._skip_banned(tracker, url, "listing_page")
-                return
+                return True
             with transaction(self.factory) as session:
                 cat, _ = repo.upsert_category(
                     session, self.competitor_id, category, run_id=tracker.run_id, now=utcnow()
@@ -298,8 +324,16 @@ class CatalogSync:
             tracker.add_item_tx(item_type="listing_page", url=url, status="succeeded", warnings=listing.warnings)
 
         owner = continuation_of or (category.url if category else url)
+        # The category whose listing this page is (the category page, a separate list endpoint).
+        listed_in = state.listing_of_page.get(url) or listing.listed_in or owner
+        state.listings.setdefault(listed_in, set()).update(
+            [(child, None) for child in listing.child_category_urls]
+            + [(link.url, link.reference) for link in listing.product_links]
+        )
         for child in listing.child_category_urls:
             state.count_item(owner, child)
+            if listing.listed_in:
+                state.listed_urls.add(child)
             if child in self._banned.urls:
                 if child not in queued:
                     queued.add(child)
@@ -318,8 +352,10 @@ class CatalogSync:
         if listing.next_page_url and listing.next_page_url not in queued:
             queued.add(listing.next_page_url)
             state.page_owner[listing.next_page_url] = owner
+            state.listing_of_page[listing.next_page_url] = listed_in
             # Continue the pagination right away so that a listing is read in one go.
             queue.appendleft(listing.next_page_url)
+        return True
 
     # ------------------------------------------------------------------ products
     def _sync_products(self, tracker: RunTracker, state: _CrawlState, options: CatalogSyncOptions) -> None:
@@ -591,6 +627,11 @@ class _CrawlState:
         self.duplicate_product_links = 0
         self.processed_product_keys: set[str] = set()
         self.page_owner: dict[str, str] = {}  # pagination page URL -> category URL of page 1
+        # category URL -> (URL, reference) of every item its listing pages show
+        self.listings: dict[str, set[tuple[str, str | None]]] = {}
+        self.listing_of_page: dict[str, str] = {}  # pagination page URL -> the category it lists for
+        self.listings_complete = True  # every listing page queued was read
+        self.listed_urls: set[str] = set()  # items of a separate list page (``listed_in``)
         self.category_ids: dict[str, int] = {}
         self.incomplete_reasons: list[str] = []
         self.mismatches: list[dict[str, Any]] = []

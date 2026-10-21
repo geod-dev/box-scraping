@@ -221,11 +221,12 @@ class PackdiscountAdapter(CompetitorAdapter):
             ancestors=[self._root_ref(), *chain[:-1]],
         )
         children = [self._absolute(s["uri"]) for s in data.get("subCategories") or [] if s.get("uri")]
+        # Category pages list no product: the category's product list says which families and
+        # products it shows, including those filed under another category (extra categories).
         return ListingPage(
             url=page.final_url,
             category=category,
-            child_category_urls=children,
-            scoped_child_urls=[self.category_products_url(node.url)],
+            child_category_urls=[*children, self.category_products_url(node.url)],
         )
 
     def _family(self, page: FetchedPage, data: dict[str, Any]) -> ListingPage:
@@ -266,6 +267,7 @@ class PackdiscountAdapter(CompetitorAdapter):
         amount = int(data.get("amount") or PAGE_SIZE)
         children = [self.product_url(self._sku(e["uri"])) for e in data.get("elements", []) if e.get("uri")]
         path = urlsplit(page.final_url).path
+        category_url = None
         if "/categories/" in path:
             category_url = normalize_url(f"https://{urlsplit(page.final_url).netloc}{path.removesuffix('/products')}")
             next_url = self.category_products_url(category_url, offset + amount)
@@ -278,6 +280,7 @@ class PackdiscountAdapter(CompetitorAdapter):
             child_category_urls=children,
             next_page_url=next_page,
             expected_item_count=int(total) if total is not None else None,
+            listed_in=category_url,
         )
 
     # ------------------------------------------------------------------ products

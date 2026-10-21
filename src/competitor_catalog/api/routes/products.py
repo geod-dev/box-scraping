@@ -76,12 +76,10 @@ def _filtered(
         category = session.get(Category, category_id)
         if category is None:
             raise not_found("category", category_id)
-        ids = (
-            repo.category_subtree_ids(session, category.competitor_id, category_id)
-            if include_subcategories
-            else [category_id]
+        # its own products and the ones it lists from other categories (extra categories)
+        stmt = stmt.where(
+            Product.id.in_(repo.category_scope_product_ids([category_id], subcategories=include_subcategories))
         )
-        stmt = stmt.where(Product.category_id.in_(ids))
     if q:
         for word in q.split():
             like = f"%{word}%"
@@ -251,6 +249,7 @@ def _detail(session, product: Product) -> dict[str, Any]:
         "latest_price": prices.get(product.id),
         "price_trend": views.price_trends(session, [product.id]).get(product.id),
         "category_path": views.category_path(session, product.category_id),
+        "listed_in": views.listed_in(session, product),
         "latest_prices": repo.latest_observations(session, product.id),
         "match_count": matches,
         "matching": schemas.MatchBriefOut(
@@ -277,6 +276,8 @@ def create_product(body: schemas.ProductCreate, session: SessionDep):
     )
     session.add(product)
     _commit(session)
+    repo.refresh_category_roles(session, competitor.id)
+    session.commit()
     return _detail(session, product)
 
 
@@ -291,6 +292,8 @@ def update_product(product_id: int, body: schemas.ProductUpdate, session: Sessio
     if {"catalog_reference", "url"} & set(changes):
         product.identity_key = repo.product_identity_key(product.catalog_reference, product.url)
     _commit(session)
+    if "category_id" in changes:
+        repo.refresh_category_roles(session, product.competitor_id)
     # matches computed from the former values become deprecated (with a notification)
     matching_service.detect_stale_matches(session, product_ids=[product.id])
     session.commit()
@@ -315,6 +318,8 @@ def delete_product(product_id: int, session: SessionDep):
     )
     session.execute(delete(ScrapeObservation).where(ScrapeObservation.product_id == product.id))
     session.delete(product)
+    session.flush()
+    repo.refresh_category_roles(session, product.competitor_id)
     session.commit()
     if watching:
         matching_service.detect_stale_matches(session, product_ids=watching)

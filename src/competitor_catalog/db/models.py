@@ -39,6 +39,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 LIFECYCLE_STATUSES = ("active", "missing")
+CATEGORY_ROLES = ("main", "extra")
 RUN_OPERATIONS = ("catalog_discovery", "price_refresh")
 RUN_STATUSES = ("running", "succeeded", "partial", "failed", "aborted")
 ITEM_TYPES = ("listing_page", "product")
@@ -122,6 +123,7 @@ class Category(TimestampMixin, Base):
         Index("ix_categories_parent_id", "parent_id"),
         CheckConstraint("parent_id IS NULL OR parent_id <> id", name="ck_categories_not_own_parent"),
         CheckConstraint(_in("status", LIFECYCLE_STATUSES), name="ck_categories_status"),
+        CheckConstraint(_in("role", CATEGORY_ROLES), name="ck_categories_role"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -140,8 +142,59 @@ class Category(TimestampMixin, Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen_run_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_runs.id", ondelete="SET NULL"))
     missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    role: Mapped[str] = mapped_column(
+        Text,
+        server_default=text("'main'"),
+        comment="extra: its subtree owns no product but lists products of other categories; main otherwise",
+    )
 
     parent: Mapped[Category | None] = relationship(remote_side="Category.id")
+
+
+class CategoryListing(Base):
+    """A category listing, on the site, a family (category) or a product that belongs to another
+    category (e.g. "Promotions" listing families filed under their own category). Only links that
+    the category tree does not already imply are stored."""
+
+    __tablename__ = "category_listings"
+    __table_comment__ = "Families/products a category lists on the site although they belong to another category"
+    __table_args__ = (
+        CheckConstraint(
+            "(listed_category_id IS NULL) <> (listed_product_id IS NULL)", name="ck_category_listings_one_target"
+        ),
+        Index(
+            "uq_category_listings_category",
+            "category_id",
+            "listed_category_id",
+            unique=True,
+            postgresql_where=text("listed_category_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_category_listings_product",
+            "category_id",
+            "listed_product_id",
+            unique=True,
+            postgresql_where=text("listed_product_id IS NOT NULL"),
+        ),
+        Index("ix_category_listings_competitor", "competitor_id"),
+        Index("ix_category_listings_listed_category", "listed_category_id"),
+        Index("ix_category_listings_listed_product", "listed_product_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), comment="the category that lists"
+    )
+    listed_category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), comment="a listed category (family), with its subtree"
+    )
+    listed_product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), comment="a listed product"
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_run_id: Mapped[int | None] = mapped_column(ForeignKey("scrape_runs.id", ondelete="SET NULL"))
 
 
 class BannedCategory(Base):

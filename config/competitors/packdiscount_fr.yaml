@@ -26,7 +26,7 @@ default_currency: EUR
 # duration of the first runs. A family costs one master page, one variations page and one
 # page per variant (price), so the product count is roughly 5 x the number of masters.
 estimate_hints:
-  listing_pages: 2700
+  listing_pages: 2950  # + one product list per category (extra categories)
   products: 6100
 
 # Scrape.do request options. The JSON API answers plain datacenter requests (1 credit).

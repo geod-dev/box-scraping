@@ -120,9 +120,16 @@ uv run catalog-scraper catalog-sync --competitor antalis_fr --max-products 50   
   A listing that 404s, a category page without breadcrumb (scope undecidable) or a family
   whose announced item count is not reached also make the run `partial`.
 * A crawl that does not start from the configured roots (`--root-url`, `--category`, retry)
-  also reads the pages an adapter marks as `scoped_child_urls`: Packdiscount category pages
-  list no product (the full crawl reads a flat product list), so a category crawl reads
-  `categories/<path>/products` instead.
+  also reads the pages an adapter marks as `scoped_child_urls` (Packdiscount: the flat product
+  list below the root category).
+* **Extra categories**: what every category lists (its listing pages, or a separate list an
+  adapter marks with `listed_in`: Packdiscount `categories/<path>/products`) is compared with
+  the tree at the end of the run. A family or product listed by a category although it belongs
+  elsewhere is stored in `category_listings`; a category whose subtree owns no product but
+  lists some becomes `role = extra`. Categories reached from such a list are crawled with
+  their subtree, so a `--category` crawl of an extra category syncs what it shows. A run that
+  could not read every listing page only adds links; otherwise links no longer listed are
+  deleted.
 * **Banned categories** (`banned_categories`, API `POST /categories/{id}/ban`) are never
   crawled: their page, every page below them and every product whose category or navigation
   path contains one are skipped (`skipped` run item, warning `in a banned category`).
@@ -301,9 +308,20 @@ the root whose value is the placeholder `HQ00000`), plus:
   title, announced item count, parent URL.
 * lifecycle: `status` (`active`/`missing`), `first_seen_at`, `last_seen_at`,
   `last_seen_run_id`, `missing_since`.
+* `role` – `main` (its subtree owns products) or `extra` (owns none but lists products of
+  other categories: promotions, pallet sales...). Recomputed by `refresh_category_roles` after
+  every catalog sync, ban and API change of a product or category parent.
 
 Uniqueness: `UNIQUE(competitor_id, url)` and a partial unique index on
 `(competitor_id, external_id) WHERE external_id IS NOT NULL`. URL slugs are never used as ids.
+
+### `category_listings` (what a category shows besides its own products)
+One row per category (`category_id`) and listed family (`listed_category_id`, with its
+subtree) or product (`listed_product_id`), with `first_seen_at`, `last_seen_at`,
+`last_seen_run_id`; deleted with either side. Only links the tree does not imply are stored:
+nothing owned by the category's subtree, nothing a sub-category lists too. "Products of a
+category" (`repo.category_scope_product_ids`: API filters, matching, price refresh, estimates)
+= owned by the subtree + listed by the subtree.
 
 ### `banned_categories` (excluded from scraping)
 Banning a category deletes it with its subtree (sub-categories, products, price history,

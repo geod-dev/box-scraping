@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from competitor_catalog.api import schemas
@@ -16,6 +16,7 @@ from competitor_catalog.db.models import (
     JOB_ACTIVE_STATUSES,
     BannedCategory,
     Category,
+    CategoryListing,
     Competitor,
     Notification,
     Product,
@@ -280,6 +281,16 @@ def category_path(session: Session, category_id: int | None) -> list[Category]:
         path.append(category)
         category_id = category.parent_id
     return list(reversed(path))
+
+
+def listed_in(session: Session, product: Product) -> list[Category]:
+    """Categories that list the product although it belongs elsewhere: the product itself, or its
+    category or an ancestor of it (its family), is listed by them."""
+    ancestors = [c.id for c in category_path(session, product.category_id)]
+    listing = select(CategoryListing.category_id).where(
+        or_(CategoryListing.listed_product_id == product.id, CategoryListing.listed_category_id.in_(ancestors))
+    )
+    return list(session.scalars(select(Category).where(Category.id.in_(listing)).order_by(Category.name, Category.id)))
 
 
 def notification_out(notification: Notification) -> schemas.NotificationOut:

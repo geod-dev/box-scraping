@@ -80,7 +80,7 @@ def test_category_identity_is_its_id_path_and_ancestors_come_from_the_path(adapt
     assert cat.name == "Carton simple cannelure"
     assert [a.url for a in cat.ancestors] == [ROOT, CAT_2]
     assert [a.name for a in cat.ancestors] == ["Catalogue Packdiscount", "Caisses Cartons et Boites"]
-    assert listing.child_category_urls == []
+    assert listing.child_category_urls == [f"{CAT_2_26}/products?amount=200&offset=0"]  # no sub-category
 
 
 def test_family_is_a_listing_whose_next_page_is_its_variations(adapter):
@@ -113,11 +113,13 @@ def test_flat_product_list_pages_through_the_whole_catalog(adapter):
     assert listing.scoped_child_urls == []
 
 
-def test_category_crawled_alone_reads_its_own_product_list(adapter):
-    # category pages list no product: a crawl limited to a category needs its product list
-    assert adapter.parse_listing(page("category_2_26.json", CAT_2_26)).scoped_child_urls == [
-        f"{CAT_2_26}/products?amount=200&offset=0"
-    ]
+def test_every_category_reads_its_own_product_list(adapter):
+    # category pages list no product: their product list says what they show, including the
+    # families filed under another category (extra categories), in full and partial crawls
+    listing = adapter.parse_listing(page("category_2_26.json", CAT_2_26))
+    assert f"{CAT_2_26}/products?amount=200&offset=0" in listing.child_category_urls
+    assert listing.scoped_child_urls == []
+    # a crawl limited to the root still needs the flat list (full crawls have it as a root URL)
     assert adapter.parse_listing(page("categories_root.json", ROOT)).scoped_child_urls == [PRODUCTS_0]
 
 
@@ -138,10 +140,15 @@ def test_category_product_list_pages_through_the_category(adapter):
     listing = adapter.parse_listing(make_page(json.dumps(body), url))
     assert adapter.classify(make_page(json.dumps(body), url)) is PageKind.LISTING
     assert listing.child_category_urls == [MASTER, SIMPLE]
+    assert listing.listed_in == CAT_2  # the engine records these items as listed by category 2
     assert listing.next_page_url == f"{CAT_2}/products?amount=200&offset=50"
+    next_page = adapter.parse_listing(make_page(json.dumps(body), listing.next_page_url))
+    assert next_page.listed_in == CAT_2
     # a small category comes without total/offset (observed on categories/2/26/products): complete
     del body["total"], body["offset"], body["amount"]
     assert adapter.parse_listing(make_page(json.dumps(body), url)).next_page_url is None
+    # the flat product list is no category's listing
+    assert adapter.parse_listing(page("products_offset_0.json", PRODUCTS_0)).listed_in is None
 
 
 # ---------------------------------------------------------------- products

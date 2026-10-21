@@ -26,6 +26,7 @@ from competitor_catalog.api.deps import (
     require_api_key,
 )
 from competitor_catalog.api.routes.competitors import refusal as job_refusal
+from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import (
     JOB_ACTIVE_STATUSES,
     Category,
@@ -494,10 +495,9 @@ def _filtered(
     if status:
         stmt = stmt.where(ProductMatch.status.in_(status))
     if category_id:
-        # A product is in a category when its own category is that one or one of its descendants.
-        tree = select(Category.id).where(Category.id.in_(category_id)).cte("category_tree", recursive=True)
-        tree = tree.union(select(Category.id).join(tree, Category.parent_id == tree.c.id))
-        stmt = stmt.where(CompetitorProduct.category_id.in_(select(tree.c.id)))
+        # A product is in a category when its own category is that one or one of its descendants,
+        # or when one of them lists it (extra categories).
+        stmt = stmt.where(CompetitorProduct.id.in_(repo.category_scope_product_ids(category_id)))
     for word in (q or "").split():
         like = f"%{word}%"
         stmt = stmt.where(

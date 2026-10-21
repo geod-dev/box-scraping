@@ -73,6 +73,10 @@ class ListingPage:
     # Listing pages needed only by a crawl limited to part of the catalog (e.g. one category):
     # the products of this category when the full crawl reaches them another way (a flat list).
     scoped_child_urls: list[str] = field(default_factory=list)
+    # URL of the category whose items this page lists, when the page is not the category page
+    # itself (e.g. a separate product list endpoint). The items of a category page (and of its
+    # pagination pages) are its listing already.
+    listed_in: str | None = None
     warnings: list[str] = field(default_factory=list)
 
 

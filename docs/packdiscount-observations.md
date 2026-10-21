@@ -64,10 +64,30 @@ Legend: **[confirmed]** seen in the responses; **[assumption]** inferred, not pr
 * **[confirmed, 2026-10-21]** `categories/<id path>/products` lists the masters and simple
   products of a category, sub-categories included (`categories/2/products`: `total` 64, pages
   of `amount` 50 by default; `amount=200` accepted). A small list (`2/26`: 16 items) comes
-  without `total`/`offset`/`amount`. The full crawl does not use it (the flat list covers the
-  catalog); a crawl limited to one category does (`scoped_child_urls`), since category pages
-  list no product. Live check: a crawl rooted at `2/26` read its list and created family
-  `P00049` under it.
+  without `total`/`offset`/`amount`. Every crawl reads it (category pages list no product):
+  it is how the extra categories below are known.
+
+## Main and extra categories
+
+* **[confirmed, 2026-10-21]** A product's own category is its `defaultCategory`; other
+  categories also list it. Example: family `P00175` (variants MCFA35P, MCFA31P, MCFA30P) has
+  `defaultCategory` `1/19` (Emballages E-commerce › Vente par palette, the web URL
+  `…-prdP00175-ctg1.19`) and is also listed by `19/196` (Vente à la palette › Palette caisse
+  carton fond automatique): `categories/19/196/products` returns it.
+* **[confirmed]** Measured on all 234 categories and the 593 products they list: 105 categories
+  are the `defaultCategory` (or an ancestor of it) of at least one product; the 129 others
+  only list products filed elsewhere. They include the whole top-level categories 14 to 29
+  (Cadeau, Export, Vente à la palette, Promotions, Écologique, Couleurs, Blancs…) and 40
+  sub-categories of the main ones (`1/10`-`1/18`, `2/311`-`2/314`, `5/58`…).
+* **[confirmed]** The category attribute `ExtraCategory` is not reliable: `true` on 75
+  categories (never a `defaultCategory`, correct), but `false` on 40 categories that are never
+  one either, and absent on the top-level categories 14-29. The scraper ignores it: a category
+  is `extra` when its subtree owns no product but lists some (`categories.role`), and its
+  listings are stored in `category_listings`.
+* **[confirmed]** Live check (2026-10-21, direct API, test database): a crawl of `1` and `19`
+  (518 requests, 350 products) gave `1` and `1/19` main, `1/12` main (owns one product),
+  `1/10`-`1/18` and the whole `19` subtree extra; `19/196` shows the 3 MCFA…P variants and
+  `P00175` stays under `1/19`.
 
 ## Identifiers
 
@@ -111,10 +131,10 @@ Legend: **[confirmed]** seen in the responses; **[assumption]** inferred, not pr
 
 ## Cost and duration (estimate, not measured on the full catalog)
 
-* Listing calls: 1 root + ~120 category nodes + 7 flat-list pages + 1352 product checks
-  (every flat-list item is classified) + ~1200 variation pages.
+* Listing calls: 1 root + ~234 category nodes + ~240 category product lists + 7 flat-list
+  pages + 1352 product checks (every flat-list item is classified) + ~1200 variation pages.
 * Variant calls: ~5 per family (one per variant, for the price): ~6000 in total.
-* Total ≈ **8 700 credits** and ≈ **8 700 requests**. The first full run on the server made
+* Total ≈ **9 000 credits** and ≈ **9 000 requests** (the category product lists add ~250). The first full run on the server made
   7 501 requests in 4 h 22 at `request_interval_seconds: 2` (2.1 s/request). The interval is
   now 0.5 s, so the pace is bounded by the Scrape.do round trip instead.
 
@@ -132,6 +152,8 @@ Legend: **[confirmed]** seen in the responses; **[assumption]** inferred, not pr
 * **[assumption]** VAT basis unknown (see Prices).
 * **[confirmed]** A scoped run (`--root-url` on a product) creates the family categories but
   not the category of a simple product (its category is only known from the product page).
-  A full run creates the whole tree from the category root, so it is not affected.
+  A full run creates the whole tree from the category root, so it is not affected. Likewise a
+  crawl of an extra category alone stores the families it lists, but a family whose own
+  category was never crawled has no parent until a full run.
 * **[assumption]** Families with more than 200 variants would be truncated; the variations
   page warns when the page size is reached. None seen so far.

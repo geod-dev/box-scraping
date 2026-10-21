@@ -121,6 +121,7 @@ def ban_category(
         delete(Product).where(Product.category_id.in_(subtree)), execution_options={"synchronize_session": False}
     )
     session.execute(delete(Category).where(Category.id.in_(subtree)), execution_options={"synchronize_session": False})
+    repo.refresh_category_roles(session, competitor.id)
     session.expire_all()  # rows changed by the database cascades (SET NULL on matches)
     deprecations = detect_stale_matches(session, product_ids=watching) if watching else []
     deleted["matches_deprecated"] = len(deprecations)

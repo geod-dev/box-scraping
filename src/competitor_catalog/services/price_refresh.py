@@ -73,7 +73,7 @@ class PriceRefresh:
                 category = repo.find_category_by_any(session, self.competitor_id, options.category)
                 if category is None:
                     raise SelectionError(f"unknown category {options.category!r}")
-                category_ids = repo.category_subtree_ids(session, self.competitor_id, category.id)
+                category_ids = [category.id]
             product_ids = None
             if options.retry_failed_run_id is not None:
                 product_ids = repo.failed_product_ids(session, self.competitor_id, options.retry_failed_run_id)
@@ -130,6 +130,9 @@ class PriceRefresh:
                 tracker.flush(_credits(self.fetcher))
                 self.observer.progress("refresh_prices", index, len(products))
             status = "succeeded" if failures == 0 else "partial"
+            if options.update_details:  # a product may have moved to another category
+                with transaction(self.factory) as session:
+                    repo.refresh_category_roles(session, self.competitor_id)
         except FatalFetchError as exc:
             error = f"fatal fetch error: {exc}"
             log.error(error)

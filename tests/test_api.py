@@ -18,14 +18,18 @@ from sqlalchemy import update
 
 from competitor_catalog.api.main import create_app
 from competitor_catalog.api.openapi import openapi_schema
+from competitor_catalog.core.adapter import load_adapter
+from competitor_catalog.core.config import parse_competitor_config
+from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.models import ScrapeRun
 from competitor_catalog.db.session import transaction
+from competitor_catalog.services.catalog_sync import CatalogSync
 from competitor_catalog.services.dispatcher import Dispatcher, DispatcherConfig
 from competitor_catalog.services.notifications import notify
 from competitor_catalog.settings import PROJECT_ROOT, Settings
 from tests.conftest import FakeFetcher
 from tests.test_jobs_db import TOY_YAML
-from tests.toy_adapter import toy_site
+from tests.toy_adapter import add_extra_categories, toy_site
 
 API_KEY = "test-key"
 
@@ -140,6 +144,48 @@ def test_invalid_job_options_are_422(client):
     assert r.status_code == 422 and r.json()["error"]["code"] == "validation_error"
     r = client.post("/api/v1/competitors/toy/worker/start", json={"task": "dance"})
     assert r.status_code == 422
+
+
+@pytest.mark.db
+def test_extra_categories_are_flagged_and_show_the_products_they_list(client, factory):
+    with transaction(factory) as session:
+        competitor_id = repo.get_competitor(session, "toy").id
+    site = add_extra_categories(toy_site())
+    adapter = load_adapter(parse_competitor_config(TOY_YAML))
+    assert CatalogSync(adapter, FakeFetcher(site), factory, competitor_id).run().status == "succeeded"
+
+    (root,) = client.get("/api/v1/categories/tree", params={"competitor": "toy"}).json()
+    nodes = {c["name"]: c for c in root["children"]}
+    assert root["role"] == "main" and root["subtree_product_count"] == 4 and root["listed_product_count"] == 4
+    assert nodes["A"]["role"] == "main" and nodes["A"]["listed_product_count"] == 3
+    promo = nodes["Promo"]
+    assert (promo["role"], promo["subtree_product_count"], promo["listed_product_count"]) == ("extra", 0, 3)
+    pallets = promo["children"][0]
+    assert (pallets["name"], pallets["role"], pallets["listed_product_count"]) == ("Pallets", "extra", 2)
+
+    extra = client.get("/api/v1/categories", params={"competitor": "toy", "role": "extra"}).json()
+    assert {c["name"] for c in extra["items"]} == {"Promo", "Pallets"}
+    detail = client.get(f"/api/v1/categories/{promo['id']}").json()
+    assert (detail["role"], detail["subtree_product_count"], detail["listed_product_count"]) == ("extra", 0, 3)
+
+    def refs(**params):
+        page = client.get("/api/v1/products", params={"sort": "reference", **params}).json()
+        return [p["catalog_reference"] for p in page["items"]]
+
+    assert refs(category_id=promo["id"]) == ["A1", "A2", "B1"]
+    assert refs(category_id=promo["id"], include_subcategories=False) == ["A2"]
+    assert refs(category_id=pallets["id"]) == ["A1", "B1"]
+    facets = client.get("/api/v1/products/facets", params={"category_id": promo["id"]}).json()
+    assert facets["total"] == 3
+
+    by_ref = {ref: client.get(f"/api/v1/products/by-reference/toy/{ref}").json() for ref in ("A1", "A2", "A3", "B1")}
+    assert [c["name"] for c in by_ref["A1"]["category_path"]] == ["Root", "A"]  # its own category
+    assert {ref: [c["name"] for c in p["listed_in"]] for ref, p in by_ref.items()} == {
+        "A1": ["Pallets"],
+        "A2": ["Promo"],
+        "A3": [],
+        "B1": ["Pallets"],  # through its category B, listed as a whole
+    }
 
 
 @pytest.mark.db

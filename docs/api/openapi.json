@@ -1255,6 +1255,28 @@
             }
           },
           {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "main",
+                    "extra"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "main: its subtree owns products (each product belongs to exactly one main category). extra: its subtree owns no product but lists, on the site, products filed under other categories (promotions, pallet sales...); an extra category can sit below a main one",
+              "title": "Role"
+            },
+            "description": "main: its subtree owns products (each product belongs to exactly one main category). extra: its subtree owns no product but lists, on the site, products filed under other categories (promotions, pallet sales...); an extra category can sit below a main one"
+          },
+          {
             "name": "q",
             "in": "query",
             "required": false,
@@ -1377,7 +1399,7 @@
           "categories"
         ],
         "summary": "Whole category tree of a competitor",
-        "description": "Nested tree with product counts (active products), sorted by name.",
+        "description": "Nested tree with product counts (active products), sorted by name. Main and extra\ncategories (``role``) are in the same tree: an extra category can sit below a main one.",
         "operationId": "category_tree_api_v1_categories_tree_get",
         "security": [
           {
@@ -7102,6 +7124,15 @@
             ],
             "title": "Missing Since"
           },
+          "role": {
+            "type": "string",
+            "enum": [
+              "main",
+              "extra"
+            ],
+            "title": "Role",
+            "description": "main: its subtree owns products (each product belongs to exactly one main category). extra: its subtree owns no product but lists, on the site, products filed under other categories (promotions, pallet sales...); an extra category can sit below a main one"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -7133,6 +7164,11 @@
             "type": "integer",
             "title": "Subtree Product Count",
             "description": "active products in this category and its descendants"
+          },
+          "listed_product_count": {
+            "type": "integer",
+            "title": "Listed Product Count",
+            "description": "active products shown in this category and its descendants: the ones they own and the ones they list from other categories (what GET /products?category_id= returns); the count of an extra category"
           }
         },
         "type": "object",
@@ -7153,12 +7189,14 @@
           "last_seen_at",
           "last_seen_run_id",
           "missing_since",
+          "role",
           "created_at",
           "updated_at",
           "path",
           "children_count",
           "product_count",
-          "subtree_product_count"
+          "subtree_product_count",
+          "listed_product_count"
         ],
         "title": "CategoryDetailOut"
       },
@@ -7317,6 +7355,15 @@
             ],
             "title": "Missing Since"
           },
+          "role": {
+            "type": "string",
+            "enum": [
+              "main",
+              "extra"
+            ],
+            "title": "Role",
+            "description": "main: its subtree owns products (each product belongs to exactly one main category). extra: its subtree owns no product but lists, on the site, products filed under other categories (promotions, pallet sales...); an extra category can sit below a main one"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -7346,6 +7393,7 @@
           "last_seen_at",
           "last_seen_run_id",
           "missing_since",
+          "role",
           "created_at",
           "updated_at"
         ],
@@ -7467,13 +7515,29 @@
             ],
             "title": "External Id"
           },
+          "role": {
+            "type": "string",
+            "enum": [
+              "main",
+              "extra"
+            ],
+            "title": "Role",
+            "description": "main: its subtree owns products (each product belongs to exactly one main category). extra: its subtree owns no product but lists, on the site, products filed under other categories (promotions, pallet sales...); an extra category can sit below a main one"
+          },
           "product_count": {
             "type": "integer",
-            "title": "Product Count"
+            "title": "Product Count",
+            "description": "active products directly in this category"
           },
           "subtree_product_count": {
             "type": "integer",
-            "title": "Subtree Product Count"
+            "title": "Subtree Product Count",
+            "description": "active products owned by this category and its descendants"
+          },
+          "listed_product_count": {
+            "type": "integer",
+            "title": "Listed Product Count",
+            "description": "active products shown in this category and its descendants, the ones listed from other categories included (what GET /products?category_id= returns)"
           },
           "children": {
             "items": {
@@ -7490,8 +7554,10 @@
           "kind",
           "status",
           "external_id",
+          "role",
           "product_count",
-          "subtree_product_count"
+          "subtree_product_count",
+          "listed_product_count"
         ],
         "title": "CategoryTreeNode"
       },
@@ -11847,6 +11913,14 @@
             "type": "array",
             "title": "Category Path"
           },
+          "listed_in": {
+            "items": {
+              "$ref": "#/components/schemas/CategoryRefOut"
+            },
+            "type": "array",
+            "title": "Listed In",
+            "description": "other categories that list this product on the site (extra categories: promotions, pallet sales...), directly or through its family; by name"
+          },
           "latest_prices": {
             "items": {
               "$ref": "#/components/schemas/ObservationOut"
@@ -11900,6 +11974,7 @@
           "extra",
           "last_seen_run_id",
           "category_path",
+          "listed_in",
           "latest_prices",
           "match_count"
         ],

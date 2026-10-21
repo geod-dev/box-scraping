@@ -42,7 +42,7 @@ class ToyAdapter(CompetitorAdapter):
 
     def parse_listing(self, page: FetchedPage) -> ListingPage:
         data = self._load(page)
-        cat = data["category"]
+        cat = data.get("category")  # absent on a separate list page ("listed_in")
         return ListingPage(
             url=page.final_url,
             category=CategoryData(
@@ -51,12 +51,15 @@ class ToyAdapter(CompetitorAdapter):
                 kind=cat.get("kind", "category"),
                 external_id=cat.get("id"),
                 ancestors=[CategoryRef(url=u) for u in cat.get("ancestors", [])],
-            ),
+            )
+            if cat
+            else None,
             child_category_urls=data.get("children", []),
             product_links=[ProductLink(url=p["url"], reference=p.get("ref")) for p in data.get("products", [])],
             next_page_url=data.get("next"),
             expected_item_count=data.get("expected"),
             scoped_child_urls=data.get("scoped", []),
+            listed_in=data.get("listed_in"),
         )
 
     def _prices(self, data: dict[str, Any]) -> PriceSnapshot:
@@ -147,4 +150,33 @@ def toy_site(products: dict[str, dict[str, Any]] | None = None, *, page_size: in
             "category_id": cat_id,
             "tiers": tiers,
         }
+    return {url: json.dumps(page) for url, page in pages.items()}
+
+
+PROMO, PALLETS, PALLETS_LIST = f"{BASE}/promo", f"{BASE}/promo/pallets", f"{BASE}/promo/pallets/list"
+
+
+def add_extra_categories(site: dict[str, str]) -> dict[str, str]:
+    """Adds two extra categories, which own no product: "Promo" lists A1 and A2 on its own page,
+    its sub-category "Pallets" lists A1 and the whole category B on a separate list page."""
+    pages = {url: json.loads(body) for url, body in site.items()}
+    root, cat_b = f"{BASE}/root", f"{BASE}/cat-b"
+    pages[root]["children"].append(PROMO)
+    pages[PROMO] = {
+        "type": "listing",
+        "category": {"url": PROMO, "name": "Promo", "id": "CP", "ancestors": [root]},
+        "children": [PALLETS],
+        "products": [{"url": f"{BASE}/p/{ref}", "ref": ref} for ref in ("A1", "A2")],
+    }
+    pages[PALLETS] = {
+        "type": "listing",
+        "category": {"url": PALLETS, "name": "Pallets", "id": "CPP", "ancestors": [root, PROMO]},
+        "children": [PALLETS_LIST],
+    }
+    pages[PALLETS_LIST] = {
+        "type": "listing",
+        "listed_in": PALLETS,
+        "children": [cat_b],
+        "products": [{"url": f"{BASE}/p/A1", "ref": "A1"}],
+    }
     return {url: json.dumps(page) for url, page in pages.items()}
