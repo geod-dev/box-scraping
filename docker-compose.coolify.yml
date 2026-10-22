@@ -80,6 +80,9 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     # SIGTERM lets running jobs stop after the current page and close as "interrupted".
     stop_grace_period: 90s
+    # No healthcheck: Coolify leaves it out of the application status (otherwise "running (unknown)").
+    # Worker liveness is reported by GET /api/v1/health (worker.online).
+    exclude_from_hc: true
     depends_on:
       db:
         condition: service_healthy
