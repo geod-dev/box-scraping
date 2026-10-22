@@ -147,7 +147,8 @@ Notes:
   run it also covers products that could not be created and failed category pages.
 * Requests are sequential with a minimum delay between request starts (Antalis: 4 s,
   Packdiscount: 0.5 s), so a full Antalis catalog sync takes hours (~2 800 requests ≈ 3 h);
-  a price refresh of ~2 300 products ≈ 2.5 h.
+  a price refresh of ~2 300 products ≈ 2.5 h. Cenpac (3 s ± 1 s jitter): a full sync ≈ 15 000
+  requests (≈ 12.5 h), a price refresh ≈ 12 500 requests (≈ 10 h).
 * `GET /health` → `worker.online` says whether the worker process is alive. When it is
   false, jobs can be queued but will not start: show a warning.
 

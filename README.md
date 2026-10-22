@@ -1,7 +1,8 @@
 # Competitor catalog scraper
 
 Scrapes competitor e-shops (**Antalis France**, packaging sector, from its HTML; **Packdiscount
-France**, from its JSON API) through the **Scrape.do** API and stores categories, products,
+France**, from its JSON API; **Cenpac France**, from its Intershop JSON navigation and its variant
+web pages) through the **Scrape.do** API and stores categories, products,
 characteristics, images and an
 append-only price history in **PostgreSQL**.
 
@@ -25,7 +26,8 @@ otherwise, incremental reruns and obsolescence tracking when products change.
 
 Site findings (what is confirmed vs assumed) are in
 [`docs/antalis-observations.md`](docs/antalis-observations.md) and
-[`docs/packdiscount-observations.md`](docs/packdiscount-observations.md).
+[`docs/packdiscount-observations.md`](docs/packdiscount-observations.md) and
+[`docs/cenpac-observations.md`](docs/cenpac-observations.md).
 
 ---
 
@@ -123,7 +125,7 @@ uv run catalog-scraper catalog-sync --competitor antalis_fr --max-products 50   
   also reads the pages an adapter marks as `scoped_child_urls` (Packdiscount: the flat product
   list below the root category).
 * **Extra categories**: what every category lists (its listing pages, or a separate list an
-  adapter marks with `listed_in`: Packdiscount `categories/<path>/products`) is compared with
+  adapter marks with `listed_in`: Packdiscount and Cenpac `categories/<path>/products`) is compared with
   the tree at the end of the run. A family or product listed by a category although it belongs
   elsewhere is stored in `category_listings`; a category whose subtree owns no product but
   lists some becomes `role = extra`. Categories reached from such a list are crawled with
@@ -232,6 +234,7 @@ src/competitor_catalog/
     normalize.py     numbers (FR/EN), units, characteristic structuring, normalized attributes
     html.py, urls.py lxml helpers (JSON-LD, canonical...), URL normalization
   adapters/antalis/ Antalis-specific parsing only (no I/O, no DB)
+  adapters/cenpac/ Cenpac-specific parsing only: Intershop JSON navigation, variant web pages, prices
   db/              SQLAlchemy models, session helpers, repositories (no HTML knowledge)
   services/        orchestration: catalog_sync.py (A), price_refresh.py (B), runs.py (tracking,
                    progress/stop hooks), jobs.py (job rules, execution, progress), dispatcher.py
@@ -243,6 +246,7 @@ src/competitor_catalog/
   app.py, cli.py   wiring and command line
 docs/api/                            API guide + openapi.json for client developers
 config/competitors/antalis_fr.yaml   competitor configuration (data, no code)
+config/competitors/cenpac_fr.yaml    Cenpac France configuration (data, no code)
 config/matching.yaml                 matching: reference catalog, weights, thresholds, taxonomy
 migrations/                          Alembic migrations
 tests/                               fixtures + unit, DB and live tests
@@ -272,7 +276,7 @@ Data flow: `service -> Fetcher.fetch(url) -> adapter.classify/parse_* -> core ty
    Reuse `core.html` (lxml helpers, JSON-LD) and `core.normalize` (decimal parsing, units,
    `build_attribute`, `build_normalized_attributes`).
 2. Add `config/competitors/<key>.yaml` (`key`, `name`, `base_url`, `adapter:
-   "module:Class"`, `root_urls`, `request_interval_seconds`, `scrapedo`, `options`).
+   "module:Class"`, `root_urls`, `request_interval_seconds`, optional `request_jitter_seconds`, `scrapedo`, `options`).
 3. Save a few pages with `catalog-scraper fetch ... --out tests/fixtures/<name>/...` and
    write parser tests like `tests/test_antalis_parsers.py`.
 4. Run `catalog-scraper catalog-sync --competitor <key> --max-products 20`.
@@ -594,6 +598,9 @@ reruns only embed changed texts. Without a payment method Voyage drops to 3 RPM 
 * A 200 response that is not a recognisable page of the site (block page, error page,
   truncated HTML) raises `UnexpectedPageError` in the adapter and is recorded as a failure,
   never as an empty category.
+* `options.block_page_markers` (competitor YAML): a 2xx body containing one of the strings
+  is retried like a 5xx by `BlockPageRetryFetcher` (`http/block_pages.py`, wired in
+  `app.build_fetcher` only when set). Cenpac: WAF page `<title>Request Rejected</title>`.
 * Secrets: the token is only passed as a query parameter by httpx; the client never logs
   request URLs, httpx's own request logging is silenced, a logging filter masks the token
   (and any `token=` parameter) in every log record and exception text, and error messages
@@ -605,7 +612,11 @@ reruns only embed changed texts. Without a payment method Voyage drops to 3 RPM 
   time, retries included): a request that took longer is followed at once, a faster one
   waits for the rest. Antalis: 4 s (its `robots.txt` asks for `Crawl-delay: 10`; requests
   come from rotating Scrape.do IPs). Packdiscount: 0.5 s (no crawl delay), so its pace is
-  the Scrape.do round trip. `--request-interval` can override it for a run.
+  the Scrape.do round trip. Cenpac: 3 s (no crawl delay; its WAF answered with a block page at
+  a fixed 1 s, retried through `options.block_page_markers`).
+* `request_jitter_seconds` (float >= 0, default 0) randomizes each wait: interval +
+  uniform(-jitter, +jitter), clamped at 0. Cenpac: 1.0, so 2-4 s between starts. `--request-interval`
+  can override the interval for a run; that run uses it as given, without jitter.
 * Scrape.do account limits (from `/info`): 50 concurrent requests; the engine uses 1.
 * Cost: ~1 credit per page. A full Antalis packaging crawl is ≈ (listing pages + product
   pages) credits; at 4 s/request, about 900 pages per hour.
@@ -676,6 +687,12 @@ uv run ruff check src tests
   retry of failed products and of failed catalog pages, resume replaying cached listing
   pages, identity mismatch, no-price vs failure, quantity queries,
   plus an Antalis end-to-end sync of family HQ02953 on fixtures.
+* `tests/test_packdiscount_parsers.py` – Packdiscount parsing on saved responses
+  (`tests/fixtures/packdiscount/`).
+* `tests/test_cenpac_parsers.py` – Cenpac parsing on saved responses and pages
+  (`tests/fixtures/cenpac/`): URLs and scope, category and product-list paging, variant pages,
+  price tiers (colis, MOQ, promo, unpriced), block pages.
+* `tests/test_block_pages.py` – block-page retry configured per competitor (`options.block_page_markers`).
 * `tests/test_scrapedo_client.py` – request format, retries, fatal errors, token redaction.
 * `tests/test_jobs_db.py` – worker jobs: one job per competitor (service and database),
   price refresh only after a full catalog, dispatcher end to end, progress, cancel, pause /
@@ -726,6 +743,10 @@ See `docs/antalis-observations.md` for details.
 * Resuming a catalog sync replays the category pages cached within `resume_within_hours`
   (48 h by default; automatic resumes cover the whole interrupted job): an older
   interruption crawls them again.
+* Cenpac: customer variants without a price ("Prix non disponible") are stored as `no_price`.
+  Colis-counted tiers are converted to sales units only when the colis size is known; the
+  rules rest on the variant page template (see `docs/cenpac-observations.md`). Out-of-scope
+  families listed by kept categories cost one request each.
 * The API has a single shared key (no users/roles).
 * Product matching: thresholds and weights are initial values, calibrated on a small sample
   only; tune them with the human decisions. The keyword taxonomy (`product_types`,

@@ -72,10 +72,11 @@ def env(factory):
 
 
 def test_run_review_decide_and_list(env):
-    summary = env.get("/matching/summary")
-    assert [s["competitor_key"] for s in summary] == ["packdiscount_fr"]  # the reference is not listed
-    assert summary[0]["availability"] == {"allowed": True, "reason": None, "message": None}
-    assert summary[0]["never_matched"] == 4
+    summary = {s["competitor_key"]: s for s in env.get("/matching/summary")}
+    assert "antalis_fr" not in summary  # the reference is not listed
+    pd = summary["packdiscount_fr"]
+    assert pd["availability"] == {"allowed": True, "reason": None, "message": None}
+    assert pd["never_matched"] == 4
     tasks = env.get("/competitors/antalis_fr/worker")["tasks"]
     assert tasks["matching"] == {"allowed": False, "reason": "matching_reference"}
 
@@ -159,7 +160,7 @@ def test_run_review_decide_and_list(env):
 def test_changed_products_become_deprecated_and_are_rerun(env):
     env.post("/matching/competitors/packdiscount_fr/run", status=202)
     env.work()
-    assert env.post("/matching/deprecated/rerun", {}, status=202)["nothing_to_do"] == ["packdiscount_fr"]
+    assert "packdiscount_fr" in env.post("/matching/deprecated/rerun", {}, status=202)["nothing_to_do"]
 
     r = env.client.patch(
         f"/api/v1/products/{env.ids['A1']}", json={"title": "Caisse carton simple cannelure 305 x 215 x 105 mm RA4"}
@@ -197,7 +198,8 @@ def test_refusals_and_config(factory):
         assert config["thresholds"] == {"auto_match": 90.0, "min_gap": 8.0, "review": 75.0}
         r = env.client.post("/api/v1/matching/competitors/packdiscount_fr/run", json={})
         assert r.status_code == 409 and r.json()["error"]["code"] == "matching_not_configured"
-        assert env.get("/matching/summary")[0]["availability"]["reason"] == "matching_not_configured"
+        summary = env.get("/matching/summary", competitor="packdiscount_fr")
+        assert summary[0]["availability"]["reason"] == "matching_not_configured"
 
 
 def test_prerequisites_through_the_api(env):
@@ -265,23 +267,24 @@ def test_console_views_of_the_matches(env, factory):
     assert detail["candidates"][0]["antalis_product"]["image_url"] == "https://img.test/a1.jpg"
 
     # price position over the associated pairs (P1 -> A1 is auto_matched)
-    position = env.get("/stats/overview")["price_position"]
-    assert position == [
-        {
-            "competitor_key": "packdiscount_fr",
-            "pairs": 0,
-            "cheaper": 0,
-            "same": 0,
-            "pricier": 0,
-            "median_gap_percent": None,
-        }
-    ]
+    def pd_position() -> dict:  # the other competitors (Cenpac) are listed too
+        rows = env.get("/stats/overview")["price_position"]
+        return next(p for p in rows if p["competitor_key"] == "packdiscount_fr")
+
+    assert pd_position() == {
+        "competitor_key": "packdiscount_fr",
+        "pairs": 0,
+        "cheaper": 0,
+        "same": 0,
+        "pricier": 0,
+        "median_gap_percent": None,
+    }
     _observe(env, env.ids["A1"], "10", price_unit="unité", price_unit_quantity="1", tax_mode="excl_tax")
     _observe(env, env.ids["P1"], "11", price_unit="UN", tax_mode="unknown")
-    position = env.get("/stats/overview")["price_position"][0]
+    position = pd_position()
     assert position["pairs"] == 1 and position["pricier"] == 1 and position["median_gap_percent"] == 10.0
     _observe(env, env.ids["P1"], "11", price_unit="UN", price_unit_quantity="1000", tax_mode="unknown")
-    assert env.get("/stats/overview")["price_position"][0]["pairs"] == 0  # per 1000: not comparable
+    assert pd_position()["pairs"] == 0  # per 1000: not comparable
 
 
 def test_list_filtered_by_category_includes_sub_categories(env, factory):

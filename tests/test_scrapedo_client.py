@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 
 import httpx
 import pytest
@@ -128,3 +129,44 @@ def test_rate_limiter_enforces_min_interval():
     now[0] += 3
     limiter.wait()
     assert slept == [7]
+
+
+def _gaps(interval: float, jitter: float, count: int, seed: int = 42) -> list[float]:
+    """Sleep durations of ``count`` back-to-back waits (the clock only moves while sleeping,
+    so every slept amount is the gap drawn for that request start)."""
+    now = [0.0]
+    slept: list[float] = []
+
+    def sleep(s: float) -> None:
+        slept.append(s)
+        now[0] += s
+
+    limiter = MinIntervalRateLimiter(
+        interval, jitter_seconds=jitter, rng=random.Random(seed), clock=lambda: now[0], sleep=sleep
+    )
+    for _ in range(count + 1):  # the first wait never sleeps
+        limiter.wait()
+    return slept
+
+
+def test_rate_limiter_jitter_stays_within_bounds_and_varies():
+    gaps = _gaps(3.0, 1.0, 300)
+    assert len(gaps) == 300
+    assert all(2.0 <= g <= 4.0 for g in gaps)
+    assert len({round(g, 6) for g in gaps}) > 250  # not a fixed cadence
+    assert min(gaps) < 2.2 and max(gaps) > 3.8  # both ends of the range are reached
+
+
+def test_rate_limiter_jitter_is_clamped_at_zero():
+    gaps = _gaps(0.5, 2.0, 300)
+    assert all(0.0 < g <= 2.5 for g in gaps)
+    # Draws below -0.5 clamp to a zero gap, which means no sleep at all.
+    assert len(gaps) < 300
+
+
+def test_rate_limiter_jitter_is_reproducible_with_a_seed():
+    assert _gaps(3.0, 1.0, 20, seed=7) == _gaps(3.0, 1.0, 20, seed=7)
+
+
+def test_rate_limiter_without_jitter_keeps_the_fixed_interval():
+    assert _gaps(3.0, 0.0, 5) == [3.0] * 5

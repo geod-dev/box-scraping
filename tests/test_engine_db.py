@@ -507,6 +507,55 @@ def test_a_resumed_sync_replays_the_listing_pages_of_the_interrupted_one(toy):
         assert s.scalar(select(func.count()).select_from(Product).where(Product.status == "missing")) == 0
 
 
+# --------------------------------------------------------------------------- Cenpac end-to-end
+
+
+def test_cenpac_family_end_to_end_on_fixtures(factory):
+    config = load_competitor_config(DEFAULT_COMPETITOR_CONFIG_DIR, "cenpac_fr")
+    adapter = load_adapter(config)
+    api = "https://www.cenpac.fr/INTERSHOP/rest/WFS/Cenpac-Front-Site/-"
+    web = "https://www.cenpac.fr"
+    pages = {
+        f"{api}/products/06703": fixture_text("cenpac/product_master_06703.json"),
+        f"{api}/products/06703/variations?amount=200": fixture_text("cenpac/variations_06703.json"),
+        f"{web}/-/-/p639405": fixture_text("cenpac/variant_639405.html"),
+        f"{api}/products/20841": fixture_text("cenpac/product_master_20841.json"),
+    }
+    with transaction(factory) as s:
+        competitor_id = repo.upsert_competitor(s, config).id
+
+    result = CatalogSync(adapter, FakeFetcher(pages), factory, competitor_id).run(
+        CatalogSyncOptions(root_urls=[f"{api}/products/06703", f"{api}/products/20841"])
+    )
+    assert result.status == "succeeded", result.incomplete_reasons
+    assert result.counters["products_created"] == 1
+
+    with transaction(factory) as s:
+        families = s.scalars(select(Category).where(Category.kind == "product_family")).all()
+        assert [c.external_id for c in families] == ["06703"]
+        assert s.scalar(select(Category).where(Category.external_id == "20841")) is None
+        skipped = s.scalar(
+            select(ScrapeRunItem).where(
+                ScrapeRunItem.scrape_run_id == result.run_id, ScrapeRunItem.url == f"{api}/products/20841"
+            )
+        )
+        assert skipped.status == "skipped"
+        assert "outside the crawl scope" in skipped.warnings
+        product = s.scalar(select(Product).where(Product.catalog_reference == "639405"))
+        assert product.identity_key == "ref:639405"
+        assert product.category.external_id == "06703"
+        assert product.url == f"{web}/-/-/p639405"
+        obs = repo.latest_observations(s, product.id)
+        assert [(o["price"], o["tax_mode"], o["is_promotional"]) for o in obs] == [
+            (Decimal("149.82"), "excl_tax", True)
+        ]
+
+    refresh = PriceRefresh(adapter, FakeFetcher(pages), factory, competitor_id).run(
+        PriceRefreshOptions(references=["639405"])
+    )
+    assert refresh.status == "succeeded", refresh.incomplete_reasons
+
+
 # --------------------------------------------------------------------------- extra categories
 
 

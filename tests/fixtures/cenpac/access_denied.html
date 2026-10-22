@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vNgiXCi7NTa5wfnzdTwt6cCeAC89X2iQgVMOFHqZa2w='; script-src-attr 'none'; style-src 'sha256-x4JZmgz0OXMTKr6gMHSdSVjbjFL4LO1oS5I+juwOc+k='; img-src https://raja.scene7.com; base-uri 'none'; form-action 'none'; object-src 'none'">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="referrer" content="no-referrer">
+	<title>Request Rejected</title>
+	<style>
+		:root {
+			color-scheme: light;
+			font-family: Arial, Helvetica, sans-serif;
+			color: #242424;
+			background: #fff;
+		}
+		* {
+			box-sizing: border-box;
+		}
+		body {
+			margin: 0;
+			padding: 30px 20px 40px;
+			text-align: center;
+			line-height: 1.5;
+		}
+		.error-pages__block-picture {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			margin: 0 auto 24px;
+			max-width: 600px;
+		}
+		.error-pages__picture {
+			display: block;
+			height: auto;
+			max-width: 100%;
+		}
+		.error-pages__picture-logo {
+			width: 300px;
+			margin-bottom: 40px;
+		}
+		.error-pages__picture-image {
+			width: 600px;
+		}
+		main {
+			max-width: 720px;
+			margin: 0 auto;
+			overflow-wrap: anywhere;
+		}
+		h1 {
+			color: #01843d;
+			font-size: 32px;
+			line-height: 1.2;
+			margin: 0 0 16px;
+		}
+		.error-pages__subtitle {
+			font-size: 20px;
+			margin: 0 0 16px;
+		}
+		.error-pages__text {
+			margin: 0 0 24px;
+		}
+		#support-id {
+			unicode-bidi: isolate;
+		}
+		button {
+			font: inherit;
+			font-weight: bold;
+			color: #fff;
+			background: #006b32;
+			border: 2px solid #006b32;
+			border-radius: 4px;
+			min-height: 44px;
+			max-width: 100%;
+			padding: 10px 24px;
+			cursor: pointer;
+		}
+		button:hover {
+			background: #005226;
+		}
+		button:focus-visible {
+			outline: 3px solid #242424;
+			outline-offset: 4px;
+		}
+	</style>
+</head>
+<body>
+	<header class="error-pages__block-picture">
+		<img src="https://raja.scene7.com/is/image/Raja/CENPAC_Maintenance_Logo" alt="Cenpac" class="error-pages__picture error-pages__picture-logo" referrerpolicy="no-referrer">
+		<img src="https://raja.scene7.com/is/image/Raja/CENPAC_Maintenance_Image" alt="403 error" class="error-pages__picture error-pages__picture-image" referrerpolicy="no-referrer">
+	</header>
+	<main>
+		<h1>Access denied</h1>
+		<p class="error-pages__subtitle">Access to this page is restricted.</p>
+		<p class="error-pages__text">Please contact support to help you resolve the situation.</p>
+		<p class="error-pages__text">Your support ID is: <span id="support-id" dir="ltr">Not available</span></p>
+		<button id="go-back" type="button" hidden>Go Back</button>
+	</main>
+	<script>
+		const transactionId = new URL(window.location.href).searchParams.get('_event_transid');
+		const isNumericId = transactionId !== null && transactionId.length > 0 && !/[^0-9]/.test(transactionId);
+		document.getElementById('support-id').textContent = isNumericId ? transactionId : 'Not available';
+		const backButton = document.getElementById('go-back');
+		if (window.history.length > 1) {
+			backButton.addEventListener('click', () => window.history.back());
+			backButton.hidden = false;
+		}
+	</script>
+</body>
+</html>

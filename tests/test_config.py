@@ -21,6 +21,10 @@ def test_repository_configs_load_and_adapters_resolve():
     assert antalis.scrapedo["render"] is False
     adapter = load_adapter(antalis)
     assert type(adapter).__name__ == "AntalisAdapter"
+    assert type(load_adapter(configs["cenpac_fr"])).__name__ == "CenpacAdapter"
+    assert configs["cenpac_fr"].options["block_page_markers"] == ["<title>Request Rejected</title>"]
+    excluded = configs["cenpac_fr"].options["excluded_top_level_category_ids"]
+    assert len(excluded) == 12 and all(isinstance(x, str) for x in excluded)
 
 
 def test_defaults():
@@ -46,3 +50,22 @@ def test_invalid_configs(change):
 def test_unknown_adapter_class():
     with pytest.raises(ConfigError):
         load_adapter(parse_competitor_config({**VALID, "adapter": "tests.toy_adapter:Nope"}))
+
+
+def test_request_jitter_defaults_to_zero_and_is_read_when_set():
+    assert parse_competitor_config(dict(VALID)).request_jitter_seconds == 0.0
+    config = parse_competitor_config({**VALID, "request_jitter_seconds": 1})
+    assert config.request_jitter_seconds == 1.0
+    assert config.as_snapshot()["request_jitter_seconds"] == 1.0
+
+
+def test_cenpac_rate_is_3s_with_1s_jitter():
+    cenpac = load_competitor_configs(DEFAULT_COMPETITOR_CONFIG_DIR)["cenpac_fr"]
+    assert cenpac.request_interval_seconds == 3.0
+    assert cenpac.request_jitter_seconds == 1.0
+
+
+@pytest.mark.parametrize("value", [-0.5, "1", None, True, float("nan"), float("inf")])
+def test_invalid_request_jitter(value):
+    with pytest.raises(ConfigError):
+        parse_competitor_config({**VALID, "request_jitter_seconds": value})

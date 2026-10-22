@@ -1,0 +1,64 @@
+# Cenpac France. See README.md "Adding a competitor" and docs/cenpac-observations.md.
+# Navigation: the Intershop REST API behind www.cenpac.fr (JSON). Products: the public
+# variant web page https://www.cenpac.fr/-/-/p<sku> (plain HTML, 1 credit), the only single
+# URL that gives a variant's labelled attributes, every price tier, the sales unit and the
+# struck promo price.
+key: cenpac_fr
+name: Cenpac France
+base_url: https://www.cenpac.fr
+adapter: competitor_catalog.adapters.cenpac:CenpacAdapter
+enabled: true
+
+# The "Les produits" catalog. Excluded branches (options below) are never crawled.
+root_urls:
+  - https://www.cenpac.fr/INTERSHOP/rest/WFS/Cenpac-Front-Site/-/categories/Cenpac
+
+# robots.txt: no Crawl-delay, nothing disallowed under /INTERSHOP/rest/ or /-/-/p<sku>.
+# 3 s between request starts, +/- 1 s random jitter (2-4 s). A live test at a fixed 1 s got
+# the site's WAF to answer with a block page; the jitter keeps the cadence from looking machine-regular.
+request_interval_seconds: 3.0
+request_jitter_seconds: 1.0
+max_attempts: 4
+default_currency: EUR
+
+# Rough estimate (2026-10-22, kept branches only): 256 category pages, ~265 product-list
+# pages, ~1 200 masters (incl. ~200 out-of-scope families listed by kept categories, 1 request
+# each), ~1 000 variations pages; ~12 500 variants (one web page each). Not measured.
+estimate_hints:
+  listing_pages: 2700
+  products: 12500
+
+scrapedo:
+  render: false
+  super: false
+  geo_code: fr
+  timeout_ms: 60000
+
+options:
+  # WAF page served with HTTP 200 (also for unknown SKUs): the fetch is retried like a 5xx
+  # (http/block_pages.py).
+  block_page_markers: ["<title>Request Rejected</title>"]
+  # Top-level categories of "Les produits" that are out of scope (user decision 2026-10-22).
+  # A family is in scope only if its own default category (the master's) is in a kept branch.
+  excluded_top_level_category_ids:
+    ["12000", "8000", "21000", "14000", "16000", "10000", "23000", "22000", "15000", "19000", "11000", "13000"]
+  # Canonical normalized attribute -> page labels (case/accent insensitive, first wins).
+  attribute_mapping:
+    length_mm: ["Longueur extérieure (mm)", "Longueur (mm)"]
+    width_mm: ["Largeur extérieure (mm)", "Laize (mm)", "Largeur (mm)", "Largeur (cm)"]
+    height_mm: ["Hauteur extérieure (mm)", "Hauteur (mm)"]
+    roll_length_m: ["Longueur (m)"]
+    thickness_um: ["Epaisseur (µ)"]
+    thickness_mm: ["Epaisseur (mm)"]
+    grammage_g_m2: ["Grammage (g/m2)"]
+    diameter_mm: ["Diamètre (mm)"]
+    material: ["Composition", "Matière"]
+    color: ["Couleur"]
+    quality_code: ["Qualité"]
+    flute_type: ["Type de cannelure"]
+    print: ["Impression"]
+    bundle_quantity: ["Paquet de", "Colis de", "Bobines/colis", "Bobines/carton"]
+    pallet_quantity: ["Palette de", "Bobines/palette", "Palettes/pile"]
+  # "L x l x h" values split into one normalized key per number (unit from the label).
+  dimension_attributes:
+    "Dimensions intérieures Lxlxh (mm)": [inner_length_mm, inner_width_mm, inner_height_mm]

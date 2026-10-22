@@ -28,6 +28,8 @@ class CompetitorConfig:
     root_urls: list[str]
     enabled: bool = True
     request_interval_seconds: float = 10.0
+    # Random spread around the interval: each wait is interval + uniform(-jitter, +jitter).
+    request_jitter_seconds: float = 0.0
     max_attempts: int = 4
     default_currency: str = "EUR"
     scrapedo: dict[str, Any] = field(default_factory=dict)
@@ -48,6 +50,7 @@ class CompetitorConfig:
         return {
             "root_urls": self.root_urls,
             "request_interval_seconds": self.request_interval_seconds,
+            "request_jitter_seconds": self.request_jitter_seconds,
             "max_attempts": self.max_attempts,
             "default_currency": self.default_currency,
             "scrapedo": self.scrapedo,
@@ -58,6 +61,17 @@ class CompetitorConfig:
 
 
 _REQUIRED = ("key", "name", "base_url", "adapter", "root_urls")
+
+
+def _non_negative_float(data: dict[str, Any], key: str, source_path: Path | None) -> float:
+    """Optional numeric key, default 0; bools, non-numbers, NaN and negatives are rejected."""
+    value = data.get(key, 0.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{source_path}: {key!r} must be a number, got {value!r}")
+    number = float(value)
+    if not number >= 0 or number == float("inf"):
+        raise ConfigError(f"{source_path}: {key!r} must be a finite number >= 0, got {value!r}")
+    return number
 
 
 def parse_competitor_config(data: dict[str, Any], source_path: Path | None = None) -> CompetitorConfig:
@@ -76,6 +90,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
     known = set(_REQUIRED) | {
         "enabled",
         "request_interval_seconds",
+        "request_jitter_seconds",
         "max_attempts",
         "default_currency",
         "scrapedo",
@@ -86,6 +101,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
     unknown = set(data) - known
     if unknown:
         raise ConfigError(f"{source_path}: unknown keys {sorted(unknown)}")
+    jitter = _non_negative_float(data, "request_jitter_seconds", source_path)
     return CompetitorConfig(
         key=str(data["key"]),
         name=str(data["name"]),
@@ -94,6 +110,7 @@ def parse_competitor_config(data: dict[str, Any], source_path: Path | None = Non
         root_urls=[str(u) for u in root_urls],
         enabled=bool(data.get("enabled", True)),
         request_interval_seconds=float(data.get("request_interval_seconds", 10.0)),
+        request_jitter_seconds=jitter,
         max_attempts=int(data.get("max_attempts", 4)),
         default_currency=str(data.get("default_currency", "EUR")),
         scrapedo=dict(data.get("scrapedo") or {}),

@@ -10,6 +10,7 @@ from competitor_catalog.core.adapter import CompetitorAdapter, load_adapter
 from competitor_catalog.core.config import CompetitorConfig, load_competitor_config
 from competitor_catalog.db import repositories as repo
 from competitor_catalog.db.session import make_engine, make_session_factory, transaction
+from competitor_catalog.http.block_pages import BlockPageRetryFetcher
 from competitor_catalog.http.ratelimit import MinIntervalRateLimiter
 from competitor_catalog.http.scrapedo import ScrapeDoClient, ScrapeDoOptions
 from competitor_catalog.matching.config import load_matching_config
@@ -27,14 +28,25 @@ class CompetitorContext:
     competitor_id: int
 
 
-def build_fetcher(settings: Settings, config: CompetitorConfig, *, interval: float | None = None) -> ScrapeDoClient:
-    return ScrapeDoClient(
+def build_fetcher(
+    settings: Settings, config: CompetitorConfig, *, interval: float | None = None
+) -> ScrapeDoClient | BlockPageRetryFetcher:
+    client = ScrapeDoClient(
         settings.require_scrapedo_api_key(),
         options=ScrapeDoOptions.from_mapping(config.scrapedo),
-        rate_limiter=MinIntervalRateLimiter(config.request_interval_seconds if interval is None else interval),
+        # An explicit interval (CLI override, 0 for tools) is used as given, without jitter.
+        rate_limiter=(
+            MinIntervalRateLimiter(config.request_interval_seconds, jitter_seconds=config.request_jitter_seconds)
+            if interval is None
+            else MinIntervalRateLimiter(interval)
+        ),
         max_attempts=config.max_attempts,
         archive_dir=settings.html_archive_dir,
     )
+    markers = config.options.get("block_page_markers") or []
+    if not markers:
+        return client
+    return BlockPageRetryFetcher(client, markers, max_attempts=config.max_attempts)
 
 
 def build_matching_runtime(settings: Settings) -> MatchingRuntime:
